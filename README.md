@@ -25,7 +25,8 @@ A matching engine is the core software component of every financial exchange. It
 
 ## What Is a Matching Engine?
 
-When someone wants to buy 100 shares of AAPL at $150, their order goes to an exchange. The exchange's matching engine checks whether any existing sell orders are willing to sell at $150 or less. If so, a trade happens. If not, the buy order "rests" on the order book, waiting for a compatible sell order to arrive.
+When someone wants to buy 100 shares of AAPL at \$150, their order goes to an exchange. The exchange's matching 
+engine checks whether any existing sell orders are willing to sell at $150 or less. If so, a trade happens. If not, the buy order "rests" on the order book, waiting for a compatible sell order to arrive.
 
 You will implement the `MatchingEngine` class, which maintains per-symbol order books, matches incoming orders against resting orders using price-time priority, handles cancellations and amendments, and reports trades and order updates through a callback interface. The engine must handle multiple symbols, partial fills, multi-level sweeps, and edge cases like priority loss on amendments.
 
