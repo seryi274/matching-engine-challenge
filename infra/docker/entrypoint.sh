@@ -18,13 +18,14 @@ MODE="${1:-build}"
 
 # ---- Assemble build tree in /build ----
 cp /harness/CMakeLists.txt /build/
-cp -r /harness/include /build/
-cp -r /harness/bench /build/
-cp -r /harness/test /build/
+cp -r --no-preserve=mode,ownership /harness/include /build/
+cp -r --no-preserve=mode,ownership /harness/bench /build/
+cp -r --no-preserve=mode,ownership /harness/test /build/
+chmod -R u+w /build/include/
 mkdir -p /build/src
 cp /student/src/*.cpp /build/src/ 2>/dev/null || cp /student/src/*.cc /build/src/ 2>/dev/null || true
 # Copy student headers (allows adding private members to matching_engine.h)
-cp -r /student/include/exchange/* /build/include/exchange/ 2>/dev/null || true
+cp -r --no-preserve=mode,ownership /student/include/exchange/* /build/include/exchange/ 2>/dev/null || true
 
 # ---- Build ----
 cd /build
