@@ -1,0 +1,59 @@
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++-13 \
+        gcc-13 \
+        cmake \
+        make \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------
+#  The build expects:
+#    /harness  -- benchmark + test harness (read-only bind mount)
+#    /student  -- student code checkout    (read-only bind mount)
+#
+#  The entrypoint script copies sources into a scratch directory,
+#  builds, then runs the requested binary.
+# ---------------------------------------------------------------
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Minimal runtime: only the C++ standard library and libc
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++-13 \
+        gcc-13 \
+        cmake \
+        make \
+        libstdc++-13-dev \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+    && apt-get purge -y --auto-remove \
+        wget curl net-tools iputils-ping iproute2 \
+    2>/dev/null; \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Remove any network diagnostic utilities that may already exist
+RUN rm -f /usr/bin/wget /usr/bin/curl /usr/bin/nc /usr/bin/ncat \
+          /usr/bin/socat /usr/bin/ssh /usr/bin/scp 2>/dev/null; true
+
+# Non-root user for execution
+RUN groupadd -r -g 999 runner && useradd -r -u 999 -g runner -m -s /bin/false runner
+
+# Working directories
+RUN mkdir -p /harness /student /build /output \
+    && chown runner:runner /build /output
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER runner
+WORKDIR /build
+
+ENTRYPOINT ["/entrypoint.sh"]

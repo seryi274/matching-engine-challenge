@@ -1,0 +1,32 @@
+FROM ubuntu:24.04
+
+LABEL description="Dev container for matching-engine-challenge students"
+LABEL maintainer="matching-engine-challenge"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++-13 \
+        gcc-13 \
+        cmake \
+        make \
+        gdb \
+        valgrind \
+        linux-tools-generic \
+        linux-tools-common \
+        git \
+        ca-certificates \
+        less \
+        vim-tiny \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Allow perf to be used by non-root users inside the container
+RUN echo 'kernel.perf_event_paranoid=-1' >> /etc/sysctl.conf || true
+
+WORKDIR /workspace
+
+# Default: open a shell
+CMD ["/bin/bash"]

@@ -1,0 +1,45 @@
+# ============================================================================
+# Matching Engine Challenge -- Terraform variables
+#
+# Copy this file to terraform.tfvars and fill in your values.
+# NEVER commit terraform.tfvars -- it may contain secrets.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Required
+# ---------------------------------------------------------------------------
+
+# Name of an existing EC2 key pair (created in the AWS console or via CLI).
+key_pair_name = "my-keypair"
+
+# HTTPS clone URL of the challenge repository.
+repo_url = "https://github.com/your-org/matching-engine-challenge.git"
+
+# Shared secret for GitHub webhook HMAC validation.
+# Generate one with: openssl rand -hex 32
+webhook_secret = "CHANGE_ME"
+
+# ---------------------------------------------------------------------------
+# Optional -- sensible defaults are provided; uncomment to override
+# ---------------------------------------------------------------------------
+
+# AWS region.
+# aws_region = "eu-west-1"
+
+# EC2 instance type. Compute-optimized recommended for benchmarking.
+# instance_type = "c5.xlarge"
+
+# CIDR allowed to SSH. Restrict to your IP for security.
+# ssh_allowed_cidr = "203.0.113.42/32"
+
+# Git branch to check out.
+# repo_branch = "main"
+
+# Set to true to use dedicated tenancy (better benchmark isolation, higher cost).
+# dedicated_tenancy = false
+
+# GitHub personal access token -- only needed for private repositories.
+# github_token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Use the default VPC instead of creating a new one.
+# use_default_vpc = true

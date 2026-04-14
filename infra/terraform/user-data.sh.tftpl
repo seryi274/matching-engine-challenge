@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Matching Engine Challenge -- EC2 user-data bootstrap script
+# This runs once on first boot. All output goes to /var/log/user-data.log.
+set -euo pipefail
+
+exec > >(tee -a /var/log/user-data.log) 2>&1
+echo "=========================================="
+echo "user-data: started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=========================================="
+
+# -------------------------------------------------------
+# 1. System packages
+# -------------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -yq
+apt-get upgrade -yq
+apt-get install -yq git curl jq build-essential cmake
+
+# -------------------------------------------------------
+# 2. Environment variables (persisted for all users)
+# -------------------------------------------------------
+cat > /etc/profile.d/matching-engine-challenge.sh <<'ENVEOF'
+export CHALLENGE_REPO_URL="${repo_url}"
+export WEBHOOK_SECRET="${webhook_secret}"
+ENVEOF
+chmod 0644 /etc/profile.d/matching-engine-challenge.sh
+
+# Source them for the rest of this script
+export CHALLENGE_REPO_URL="${repo_url}"
+export WEBHOOK_SECRET="${webhook_secret}"
+
+# -------------------------------------------------------
+# 3. Clone the repository
+# -------------------------------------------------------
+REPO_DIR="/opt/matching-engine-challenge"
+
+%{ if github_token != "" ~}
+# Authenticated clone for private repos
+CLONE_URL=$(echo "${repo_url}" | sed "s|https://|https://${github_token}@|")
+%{ else ~}
+CLONE_URL="${repo_url}"
+%{ endif ~}
+
+git clone --branch "${repo_branch}" "$CLONE_URL" "$REPO_DIR"
+
+# Strip the token from the remote URL so it is not stored on disk
+cd "$REPO_DIR"
+git remote set-url origin "${repo_url}"
+
+%{ if github_token != "" ~}
+# Configure git credential helper so setup-server.sh and
+# create-team-branches.sh can push team branches to origin
+git config --global credential.helper store
+cat > /root/.git-credentials <<CRED
+https://${github_token}:x-oauth-basic@github.com
+CRED
+chmod 600 /root/.git-credentials
+%{ endif ~}
+
+# Configure git identity for automated commits (team branch creation)
+git config --global user.email "challenge-bot@noreply.local"
+git config --global user.name "Challenge Bot"
+
+chown -R ubuntu:ubuntu "$REPO_DIR"
+
+# -------------------------------------------------------
+# 4. Run the setup script
+# -------------------------------------------------------
+if [ -f "$REPO_DIR/infra/scripts/setup-server.sh" ]; then
+    echo "user-data: running setup-server.sh"
+    chmod +x "$REPO_DIR/infra/scripts/setup-server.sh"
+    bash "$REPO_DIR/infra/scripts/setup-server.sh"
+else
+    echo "user-data: WARNING -- setup-server.sh not found at $REPO_DIR/infra/scripts/setup-server.sh"
+fi
+
+# -------------------------------------------------------
+# 5. Completion marker
+# -------------------------------------------------------
+date -u +%Y-%m-%dT%H:%M:%SZ > /var/log/user-data-completed.marker
+echo "=========================================="
+echo "user-data: finished at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=========================================="

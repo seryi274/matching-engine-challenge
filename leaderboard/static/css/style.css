@@ -1,0 +1,826 @@
+/* ==========================================================
+   Matching Engine Challenge -- Leaderboard Theme
+   G-Research branded, dark variant
+   Optimized for 1920x1080 projector display
+   ========================================================== */
+
+/* --- Indivisible Font ------------------------------------ */
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Light.otf') format('opentype');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Light_Italic.otf') format('opentype');
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Italic.otf') format('opentype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_SemiBold.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_SemiBold_Italic.otf') format('opentype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Bold_Italic.otf') format('opentype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Black.otf') format('opentype');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Indivisible';
+  src: url('../fonts/fonnts.com-Indivisible_Black_Italic.otf') format('opentype');
+  font-weight: 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* --- Reset & Base ---------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-primary:   #1a1d21;
+  --bg-secondary: #222528;
+  --bg-tertiary:  #2a2d31;
+  --bg-row-even:  #222528;
+  --bg-row-odd:   #272a2e;
+  --bg-hover:     #32373c;
+  --text-primary: #f0f2f4;
+  --text-secondary: #9ca3ab;
+  --text-muted:   #5c6370;
+  --border:       #383c42;
+  --accent:       #ffffff;
+  --accent-green: #4ec960;
+  --accent-red:   #e55b5b;
+  --gold:         #ffd700;
+  --silver:       #c0c0c0;
+  --bronze:       #cd7f32;
+  --gr-charcoal:  #32373c;
+  --gr-dark:      #1a1d21;
+  --gr-white:     #ffffff;
+  --font-label:   'Indivisible', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:    'Indivisible', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+html {
+  font-size: 18px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-label);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+  line-height: 1.5;
+}
+
+/* --- Header ---------------------------------------------- */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: var(--gr-charcoal);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header__brand {
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+}
+
+.header__logo {
+  height: 28px;
+  width: auto;
+}
+
+.header__divider {
+  width: 1px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.header__title {
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--gr-white);
+}
+
+.header__stats {
+  display: flex;
+  gap: 2.5rem;
+}
+
+.stat-box {
+  text-align: center;
+}
+
+.stat-box__value {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--gr-white);
+}
+
+.stat-box__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+/* --- Main Container -------------------------------------- */
+.main {
+  padding: 1.5rem 2rem 5rem;
+  max-width: 1800px;
+  margin: 0 auto;
+}
+
+.section-title {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-title::before {
+  content: '';
+  display: inline-block;
+  width: 4px;
+  height: 1.2em;
+  background: var(--gr-white);
+  border-radius: 2px;
+}
+
+/* --- Leaderboard Table ----------------------------------- */
+.leaderboard-table-wrapper {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 2rem;
+}
+
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 1rem;
+}
+
+.leaderboard-table th {
+  background: var(--gr-charcoal);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+
+.leaderboard-table th.col-number,
+.leaderboard-table td.col-number {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.leaderboard-table td {
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  transition: background 0.3s ease;
+}
+
+.leaderboard-table tbody tr:nth-child(even) {
+  background: var(--bg-row-even);
+}
+
+.leaderboard-table tbody tr:nth-child(odd) {
+  background: var(--bg-row-odd);
+}
+
+.leaderboard-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+/* Rank badges */
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.rank-badge--1 {
+  background: linear-gradient(135deg, #ffd700, #ffb300);
+  color: #1a1400;
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.4);
+}
+
+.rank-badge--2 {
+  background: linear-gradient(135deg, #c0c0c0, #a0a0a0);
+  color: #1a1a1a;
+  box-shadow: 0 0 10px rgba(192, 192, 192, 0.3);
+}
+
+.rank-badge--3 {
+  background: linear-gradient(135deg, #cd7f32, #a5641e);
+  color: #1a1000;
+  box-shadow: 0 0 10px rgba(205, 127, 50, 0.3);
+}
+
+.rank-badge--other {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+/* Top-3 row highlights */
+.leaderboard-table tbody tr.rank-1 {
+  background: rgba(255, 215, 0, 0.06);
+  border-left: 3px solid var(--gold);
+}
+
+.leaderboard-table tbody tr.rank-2 {
+  background: rgba(192, 192, 192, 0.05);
+  border-left: 3px solid var(--silver);
+}
+
+.leaderboard-table tbody tr.rank-3 {
+  background: rgba(205, 127, 50, 0.05);
+  border-left: 3px solid var(--bronze);
+}
+
+/* Team name styling */
+.team-name {
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.rank-1 .team-name { color: var(--gold); }
+.rank-2 .team-name { color: var(--silver); }
+.rank-3 .team-name { color: var(--bronze); }
+
+/* Metric numbers */
+.metric-value {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 1rem;
+}
+
+.metric-value--throughput {
+  color: var(--accent-green);
+  font-weight: 700;
+}
+
+.metric-value--latency {
+  color: var(--gr-white);
+}
+
+.metric-value--p99 {
+  color: var(--text-secondary);
+}
+
+.metric-value--submissions {
+  color: var(--text-primary);
+}
+
+.metric-value--timestamp {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Row update animation */
+@keyframes rowFlash {
+  0%   { background: rgba(255, 255, 255, 0.15); }
+  100% { background: transparent; }
+}
+
+.leaderboard-table tbody tr.row-updated {
+  animation: rowFlash 1.5s ease-out;
+}
+
+@keyframes rowPulse {
+  0%, 100% { box-shadow: inset 0 0 0 0 rgba(255, 255, 255, 0); }
+  50%      { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.3); }
+}
+
+.leaderboard-table tbody tr.row-new {
+  animation: rowPulse 0.8s ease-in-out 2;
+}
+
+/* --- Charts Section -------------------------------------- */
+.charts-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.chart-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.2rem;
+}
+
+.chart-card__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-bottom: 0.8rem;
+}
+
+.chart-card canvas {
+  width: 100% !important;
+  height: 320px !important;
+}
+
+/* --- Activity Ticker ------------------------------------- */
+.ticker-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2.8rem;
+  background: var(--gr-charcoal);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  z-index: 100;
+}
+
+.ticker-bar__label {
+  flex-shrink: 0;
+  padding: 0 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--gr-white);
+  background: var(--bg-tertiary);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid var(--border);
+}
+
+.ticker-bar__track {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  height: 100%;
+}
+
+.ticker-bar__content {
+  display: flex;
+  align-items: center;
+  gap: 3rem;
+  height: 100%;
+  white-space: nowrap;
+  animation: tickerScroll 30s linear infinite;
+  padding-left: 100%;
+}
+
+.ticker-bar__content:hover {
+  animation-play-state: paused;
+}
+
+@keyframes tickerScroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+.ticker-item {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.ticker-item__team {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ticker-item__metric {
+  font-family: var(--font-mono);
+  color: var(--accent-green);
+}
+
+.ticker-item__time {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+/* --- Empty / Loading States ------------------------------ */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  color: var(--text-muted);
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top: 3px solid var(--gr-white);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 1rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.empty-message {
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 3rem;
+}
+
+/* --- Connection Status ----------------------------------- */
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.3s;
+}
+
+.connection-dot--connected {
+  background: var(--accent-green);
+  box-shadow: 0 0 6px rgba(78, 201, 96, 0.5);
+}
+
+.connection-dot--disconnected {
+  background: var(--accent-red);
+}
+
+/* ==========================================================
+   REVEAL PAGE -- Final Ceremony
+   ========================================================== */
+
+.reveal-container {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  position: relative;
+  overflow: hidden;
+}
+
+.reveal-container::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.02) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.reveal-slide {
+  text-align: center;
+  max-width: 1200px;
+  padding: 2rem;
+  position: relative;
+  z-index: 1;
+}
+
+/* Opening stats slide */
+.reveal-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3rem;
+  margin: 3rem 0;
+}
+
+.reveal-stat {
+  text-align: center;
+}
+
+.reveal-stat__value {
+  font-family: var(--font-mono);
+  font-size: 4rem;
+  font-weight: 700;
+  color: var(--gr-white);
+  line-height: 1.1;
+}
+
+.reveal-stat__label {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  margin-top: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Team reveal card */
+.reveal-team-card {
+  opacity: 0;
+  transform: translateX(60px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.reveal-team-card.active {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.reveal-team-rank {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.05em;
+}
+
+.reveal-team-name {
+  font-size: 3.5rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 1.5rem;
+  line-height: 1.1;
+}
+
+.reveal-team-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.reveal-metric {
+  text-align: center;
+}
+
+.reveal-metric__value {
+  font-family: var(--font-mono);
+  font-size: 2.2rem;
+  font-weight: 700;
+}
+
+.reveal-metric__label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 0.3rem;
+}
+
+.reveal-metric--throughput .reveal-metric__value {
+  color: var(--accent-green);
+}
+
+.reveal-metric--latency .reveal-metric__value {
+  color: var(--gr-white);
+}
+
+.reveal-submissions {
+  font-size: 1rem;
+  color: var(--text-muted);
+  margin-top: 1rem;
+}
+
+.reveal-submissions span {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+/* Top 3 podium */
+.reveal-team-card.top-3 .reveal-team-name {
+  font-size: 4.5rem;
+}
+
+.reveal-team-card.top-1 .reveal-team-name {
+  color: var(--gold);
+  text-shadow: 0 0 40px rgba(255, 215, 0, 0.3);
+  font-size: 5.5rem;
+}
+
+.reveal-team-card.top-2 .reveal-team-name {
+  color: var(--silver);
+  text-shadow: 0 0 30px rgba(192, 192, 192, 0.2);
+}
+
+.reveal-team-card.top-3 .reveal-team-name {
+  color: var(--bronze);
+  text-shadow: 0 0 30px rgba(205, 127, 50, 0.2);
+}
+
+/* Winner podium icon */
+.reveal-trophy {
+  font-size: 5rem;
+  margin-bottom: 1rem;
+  display: none;
+}
+
+.reveal-team-card.top-1 .reveal-trophy,
+.reveal-team-card.top-2 .reveal-trophy,
+.reveal-team-card.top-3 .reveal-trophy {
+  display: block;
+}
+
+/* Progress indicator */
+.reveal-progress {
+  position: fixed;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  z-index: 10;
+}
+
+.reveal-progress__text {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.reveal-progress__hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.reveal-progress__bar {
+  width: 200px;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.reveal-progress__fill {
+  height: 100%;
+  background: var(--gr-white);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+/* Heading styles for reveal */
+.reveal-heading {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.02em;
+}
+
+.reveal-subheading {
+  font-size: 1.2rem;
+  color: var(--text-secondary);
+  margin-bottom: 2rem;
+}
+
+/* Confetti canvas */
+#confetti-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* Count-up animation placeholder */
+.count-up {
+  display: inline-block;
+}
+
+/* Slide transitions */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(80px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.animate-slide-in  { animation: slideInRight 0.6s ease forwards; }
+.animate-fade-in   { animation: fadeIn 0.5s ease forwards; }
+.animate-scale-in  { animation: scaleIn 0.5s ease forwards; }
+
+/* Delayed animations for stagger */
+.delay-1 { animation-delay: 0.15s; opacity: 0; }
+.delay-2 { animation-delay: 0.3s;  opacity: 0; }
+.delay-3 { animation-delay: 0.45s; opacity: 0; }
+.delay-4 { animation-delay: 0.6s;  opacity: 0; }
+
+/* ==========================================================
+   Responsive (tablet fallback -- mainly for testing)
+   ========================================================== */
+@media (max-width: 1200px) {
+  html { font-size: 16px; }
+  .charts-section { grid-template-columns: 1fr; }
+  .reveal-stats-grid { grid-template-columns: 1fr; gap: 1.5rem; }
+  .reveal-team-metrics { grid-template-columns: 1fr; gap: 1rem; }
+}
+
+@media (max-width: 768px) {
+  html { font-size: 14px; }
+  .header { flex-direction: column; gap: 1rem; }
+  .header__stats { gap: 1.5rem; }
+}

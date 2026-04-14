@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "WebFetch(domain:www.gresearch.com)",
+      "Bash(open:*)",
+      "Bash(cmake -B build -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build build)",
+      "Bash(./build/test_correctness)",
+      "Bash(git rm:*)"
+    ]
+  }
+}
