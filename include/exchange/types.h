@@ -85,14 +85,4 @@ namespace exchange {
         uint32_t total_quantity;
         uint32_t order_count;
     };
-
-    struct Order {
-        uint64_t order_id;
-        uint32_t quantity;
-    };
-
-    struct OrderBook {
-        std::map<int64_t, std::list<Order>, std::greater<>> bids;
-        std::map<int64_t, std::list<Order>> asks;
-    };
 } // namespace exchange

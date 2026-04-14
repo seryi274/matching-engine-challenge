@@ -9,6 +9,26 @@
 #include <unordered_map>
 
 namespace exchange {
+    struct Order {
+        uint64_t order_id;
+        uint32_t quantity;
+    };
+
+    using price_map = std::map<int64_t, std::list<Order>>;
+    struct OrderBook {
+        // should we use a queue instead of a list? because we're treating a list as a fifo
+        // container really. it would be the same. also, since queue uses a vector underneath,
+        // maybe it has better cache locality??? who knows.
+        // oh wait we can't use a vector because we need to have consistent iterators so we can
+        // put something in order_lookup_
+        // maybe we can store pointers instead? hmmm that would create another level of indirection
+        // which can actually impact performance negatively.
+
+        // bids are NEGATIVE
+        price_map bids;
+        price_map asks;
+    };
+
     /// ============================================================
     ///  MatchingEngine
     ///
@@ -118,10 +138,30 @@ namespace exchange {
 
         // TODO: Add your internal data structures here.
         std::unordered_map<std::string, OrderBook> books_;
-        std::unordered_map<uint64_t, std::list<Order>::iterator> order_lookup_;
+
+        struct OrderLookupInfo {
+            // bids are NEGATIVE
+            int64_t price;
+            std::list<Order>::iterator order_it;
+            std::list<Order>* list_p;
+            price_map* order_book;
+        };
+
+        std::unordered_map<uint64_t, OrderLookupInfo> order_lookup_;
 
         Listener* listener_;
         uint64_t next_order_id_ = 1;
+
+        /**
+         *
+         * @param order_it
+         * @param order_list
+         * @return An iterator pointing to the next element in @code order_list@endcode, or @code end@endcode.
+         */
+        std::list<Order>::iterator removeOrder(std::list<Order>::iterator order_it, std::list<Order>& order_list) {
+            this->order_lookup_.erase(order_it->order_id);
+            return order_list.erase(order_it);
+        }
 
         template <typename T>
         std::vector<PriceLevel> getBookSideSnapshot(std::map<int64_t, std::list<Order>, T> book) const {
