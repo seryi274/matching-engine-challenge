@@ -11,7 +11,7 @@ set -euo pipefail
 #
 #  Mount points expected:
 #    /harness   (ro)  -- CMakeLists.txt, bench/, test/, include/exchange/
-#    /student   (ro)  -- src/matching_engine.cpp (+ any extra .cpp)
+#    /student   (ro)  -- src/*.cpp, include/exchange/ (student headers overlay harness)
 # ---------------------------------------------------------------
 
 MODE="${1:-build}"
@@ -23,6 +23,8 @@ cp -r /harness/bench /build/
 cp -r /harness/test /build/
 mkdir -p /build/src
 cp /student/src/*.cpp /build/src/ 2>/dev/null || cp /student/src/*.cc /build/src/ 2>/dev/null || true
+# Copy student headers (allows adding private members to matching_engine.h)
+cp -r /student/include/exchange/* /build/include/exchange/ 2>/dev/null || true
 
 # ---- Build ----
 cd /build
