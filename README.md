@@ -33,7 +33,8 @@ You will implement the `MatchingEngine` class, which maintains per-symbol order 
 
 - Teams of 3-4 people.
 - Implement the `MatchingEngine` class in `src/matching_engine.cpp`.
-- **DO NOT** modify any files in `include/`. The interface is fixed and the server will overwrite your changes.
+- **DO NOT** change the public interface in `include/exchange/matching_engine.h` (method signatures, constructor, etc.). You **may** add private members, helper classes, and `#include` directives to the header.
+- `include/exchange/types.h` must not be modified.
 - You may add additional `.cpp` and `.h` files in `src/`. The build system automatically picks up all source files in that directory.
 - **Single-threaded only.** No threads, no async, no coroutines, no multi-process tricks.
 - The server compiles with: `g++ -std=c++20 -O2 -march=native -DNDEBUG`.
