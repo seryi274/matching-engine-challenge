@@ -3,8 +3,19 @@
 #include "types.h"
 #include <vector>
 #include <string>
+#include <list>
+#include <unordered_map>
+#include <queue>
+#include <cmath>
+#include <iostream>
+#include <algorithm>
 
 namespace exchange {
+
+struct BookEntry {
+    uint32_t quantity;
+    uint64_t id;
+};
 
 /// ============================================================
 ///  MatchingEngine
@@ -112,6 +123,20 @@ private:
     //    - Intrusive linked lists
     //    - Pre-allocated order arrays with free lists
     // ============================================================
+
+    inline void match_offers(std::list<BookEntry>* list, uint32_t& amount, const std::string& symbol, const uint32_t& price, const uint64_t& caller_id, const Side& caller_side);
+    inline std::vector<PriceLevel> get_snapshot(const std::unordered_map<int64_t, std::list<BookEntry>>& um) const;
+    OrderAck addOrderWithId(const OrderRequest& request, uint64_t order_id);
+
+    std::unordered_map<std::string, std::unordered_map<int64_t, std::list<BookEntry>>> bids, asks;
+
+    std::unordered_map<std::string, std::priority_queue<int64_t>> bid_prc, ask_prc;
+
+    std::unordered_map<int64_t, std::pair<std::list<BookEntry>*, std::list<BookEntry>::iterator>> order_ids;
+
+    std::unordered_map<int64_t, OrderRequest> order_requests;
+
+    int order_count = 0;
 
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
