@@ -15,6 +15,7 @@ namespace exchange {
     };
 
     using price_map = std::map<int64_t, std::list<Order>>;
+
     struct OrderBook {
         // should we use a queue instead of a list? because we're treating a list as a fifo
         // container really. it would be the same. also, since queue uses a vector underneath,
@@ -24,7 +25,7 @@ namespace exchange {
         // maybe we can store pointers instead? hmmm that would create another level of indirection
         // which can actually impact performance negatively.
 
-        // bids are NEGATIVE
+        // bids are NEGATIVE.
         price_map bids;
         price_map asks;
     };
@@ -147,6 +148,7 @@ namespace exchange {
             price_map* order_book;
         };
 
+        // We only store RESTING orders here
         std::unordered_map<uint64_t, OrderLookupInfo> order_lookup_;
 
         Listener* listener_;
@@ -163,16 +165,21 @@ namespace exchange {
             return order_list.erase(order_it);
         }
 
-        template <typename T>
-        std::vector<PriceLevel> getBookSideSnapshot(std::map<int64_t, std::list<Order>, T> book) const {
+        template<bool NegativePrice = false>
+        std::vector<PriceLevel> getBookSideSnapshot(const std::map<int64_t, std::list<Order>>& book) const {
             std::vector<PriceLevel> prices(book.size());
             auto prices_it = prices.begin();
-            for (auto book_it = book.rbegin(); book_it != book.rend(); ++book_it, ++prices_it) {
-                prices_it->price = book_it->first;
-                for (auto orders_it = book_it->second.begin(); orders_it != book_it->second.end(); ++orders_it) {
+            for (const auto& [price, orders_list] : book) {
+                // CONSTEXPR ALL THE THINGS.
+                if constexpr (NegativePrice) prices_it->price = -price;
+                else prices_it->price = price;
+
+                prices_it->order_count = 0;
+                for (const auto& [_, quantity] : orders_list) {
                     ++prices_it->order_count;
-                    prices_it->total_quantity += orders_it->quantity;
+                    prices_it->total_quantity += quantity;
                 }
+                ++prices_it;
             }
 
             return prices;

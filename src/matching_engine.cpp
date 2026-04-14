@@ -253,7 +253,8 @@ namespace exchange {
     std::vector<PriceLevel> MatchingEngine::getBookSnapshot(const std::string& symbol, Side side) const {
         // TODO: UPDATE THE FUNCTION, BIDS ARE NOW NEGATIVE. ALSO, MAPS ARE THE SAME TYPE
         // SO WE DON'T NEED TEMPLATE. I'M WRITING IN CAPS SO YOU CAN DISTINGUISH MY TODOS
-        // FROM THE REST OF THEIR TODOS. OK BYE
+        // FROM THE REST OF THEIR TODOS. OK BYE.
+        // ^ THIS IS DONE.
         //
         // Sort best-to-worst:
         //   Buy side:  highest price first
@@ -263,14 +264,11 @@ namespace exchange {
         if (books_it == books_.end()) return {};
 
         return side == Side::Buy
-                   ? getBookSideSnapshot(books_it->second.bids)
-                   : getBookSideSnapshot(books_it->second.asks);
+                   ? getBookSideSnapshot<true>(books_it->second.bids)
+                   : getBookSideSnapshot<false>(books_it->second.asks);
     }
 
     uint64_t MatchingEngine::getOrderCount() const {
-        // TODO: Return total number of resting orders across all symbols.
         return this->order_lookup_.size();
-
-        return 0; // placeholder
     }
 } // namespace exchange
