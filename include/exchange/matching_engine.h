@@ -1,5 +1,6 @@
 #pragma once
 
+#include <iostream>
 #include <list>
 #include <map>
 
@@ -145,7 +146,19 @@ namespace exchange {
             int64_t price;
             std::list<Order>::iterator order_it;
             std::list<Order>* list_p;
-            price_map* order_book;
+            decltype(books_)::iterator book_it;
+
+            [[nodiscard]] price_map& getPriceMap() const {
+                return price < 0 ? book_it->second.bids : book_it->second.asks;
+            }
+
+            [[nodiscard]] Side getSide() const {
+                return price < 0 ? Side::Buy : Side::Sell;
+            }
+
+            [[nodiscard]] std::string getSymbol() const {
+                return book_it->first;
+            }
         };
 
         // We only store RESTING orders here
@@ -153,7 +166,6 @@ namespace exchange {
 
         Listener* listener_;
         uint64_t next_order_id_ = 1;
-
         /**
          *
          * @param order_it
@@ -183,6 +195,106 @@ namespace exchange {
             }
 
             return prices;
+        }
+
+        struct OrderActiveMatch {
+            std::string symbol;
+            int64_t price;
+            uint32_t quantity;
+        };
+
+        /**
+         * @tparam side Side of the active order.
+         */
+        template<Side side>
+        OrderAck match(uint64_t active_order_id, const OrderActiveMatch& request) {
+            auto book_it = this->books_.try_emplace(request.symbol).first;
+
+            price_map *book, *my_book;
+            if constexpr (side == Side::Buy) {
+                book = &book_it->second.asks;
+                my_book = &book_it->second.bids;
+            } else {
+                book = &book_it->second.bids;
+                my_book = &book_it->second.asks;
+            }
+
+            int64_t active_price;
+            if constexpr (side == Side::Buy) active_price = -request.price;
+            else active_price = request.price;
+
+            auto active_quantity = request.quantity;
+
+            auto current_price_it = book->begin();
+            std::list<Order>* current_order_list_p;
+            std::list<Order>::iterator current_order_it;
+            while (active_quantity > 0 && current_price_it != book->end()) {
+                current_order_list_p = &current_price_it->second;
+                current_order_it = current_order_list_p->begin();
+
+                // if it's a bid, it's negative.
+                const int64_t current_price = current_price_it->first;
+
+                if (0 < active_price + current_price) break;
+
+                while (active_quantity > 0 && current_order_it != current_order_list_p->end()) {
+                    auto& [resting_order_id, resting_quantity] = *current_order_it;
+                    const uint32_t trade_quantity = std::min(resting_quantity, active_quantity);
+
+                    // Execution price is always the RESTING (passive) order's price
+                    const int64_t trade_price = std::abs(current_price);
+                    if constexpr (side == Side::Buy) {
+                        this->listener_->onTrade(Trade{
+                            active_order_id, resting_order_id, request.symbol, trade_price, trade_quantity
+                        });
+                    } else {
+                        this->listener_->onTrade(Trade{
+                            resting_order_id, active_order_id, request.symbol, trade_price, trade_quantity
+                        });
+                    }
+
+                    resting_quantity -= trade_quantity;
+                    active_quantity -= trade_quantity;
+
+                    if (resting_quantity == 0) {
+                        this->listener_->onOrderUpdate(OrderUpdate{
+                            resting_order_id, OrderStatus::Filled, 0
+                        });
+                        current_order_it = removeOrder(current_order_it, *current_order_list_p);
+                    } else {
+                        this->listener_->onOrderUpdate(OrderUpdate{
+                            resting_order_id, OrderStatus::Accepted, resting_quantity
+                        });
+                    }
+
+                    if (current_order_it == current_order_list_p->end()) break;
+                    ++current_order_it;
+                }
+                if (current_order_list_p->empty()) {
+                    current_price_it = book->erase(current_price_it);
+                } else ++current_price_it;
+            }
+
+            if (active_quantity > 0) {
+                auto& current_list = (*my_book)[active_price];
+                current_list.emplace_back(active_order_id, active_quantity);
+
+                this->order_lookup_.insert_or_assign(active_order_id,
+                                                     OrderLookupInfo{
+                                                         active_price, std::prev(current_list.end()), &current_list, book_it
+                                                     }
+                );
+
+                this->listener_->onOrderUpdate(OrderUpdate{
+                    active_order_id, OrderStatus::Accepted, active_quantity
+                });
+                return {active_order_id, OrderStatus::Accepted};
+            }
+            this->listener_->onOrderUpdate(OrderUpdate{
+                active_order_id, OrderStatus::Filled, 0
+            });
+
+            return {active_order_id, OrderStatus::Filled};
         }
     };
 } // namespace exchange
