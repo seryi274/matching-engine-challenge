@@ -159,8 +159,8 @@ static void printStats(const char* name, const Stats& s) {
 }
 
 int main(int argc, char* argv[]) {
-    constexpr size_t WARMUP_OPS  = 50'000;
-    constexpr size_t MEASURE_OPS = 1'000'000;
+    constexpr size_t WARMUP_OPS  = 500'000;
+    constexpr size_t MEASURE_OPS = 10'000'000;
     constexpr int    ITERATIONS  = 3;
 
     bool json_output = false;
