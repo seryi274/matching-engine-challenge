@@ -118,21 +118,28 @@ private:
     // ============================================================
 
     struct Order {
-        uint64_t    symbol;     // Instrument identifier (e.g., "AAPL")
+        std::string symbol;     // Instrument identifier (e.g., "AAPL")
+        Side        side;
         int64_t     price;      // Price in ticks (integer, always > 0 for limit)
+        uint64_t    timestamp;
         uint64_t    order_id;
         uint32_t    quantity;   // Number of lots (always > 0)
-        uint32_t    timestamp;
-        int8_t     multiplier;
-        uint8_t     bookIndex;
     };
 
     struct OrderCmp{
         bool operator()(const Order& a, const Order& b) const {
-            if (a.price != b.price) {
-                return a.price * a.multiplier > b.price * b.multiplier;
+            if (a.side == Side::Buy) {
+                if (a.price != b.price) {
+                    return a.price > b.price;
+                } else {
+                    return a.timestamp < b.timestamp;
+                }
             } else {
-                return a.timestamp < b.timestamp;
+                if (a.price != b.price) {
+                    return a.price < b.price;
+                } else {
+                    return a.timestamp < b.timestamp;
+                }
             }
         }
     };
@@ -140,13 +147,12 @@ private:
     
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
-    uint32_t  next_timestamp_id_ = 1;
+    uint64_t  next_timestamp_id_ = 1;
     uint32_t  next_symbol_id_ = 0;
 
    std::unordered_map<std::string, uint32_t> stockToId;
    std::unordered_map<uint64_t, Order> existingOrders;
    std::vector<std::set<Order, OrderCmp>> book[2];
-   std::vector<std::string> symbols;
 };
 
 }  // namespace exchange
