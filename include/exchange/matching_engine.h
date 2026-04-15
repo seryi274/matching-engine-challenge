@@ -6,6 +6,9 @@
 
 namespace exchange {
 
+struct EngineState;  // defined in matching_engine.cpp
+
+
 /// ============================================================
 ///  MatchingEngine
 ///
@@ -116,7 +119,8 @@ private:
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
 
-    // TODO: Add your internal data structures here.
+    // typed pointer to per-instance state; defined in the .cpp
+    EngineState* state_ = nullptr;
 };
 
 }  // namespace exchange
