@@ -53,7 +53,7 @@ public:
     ///   7. Returns an OrderAck with the assigned order_id and status
     ///
     /// Reject if: price <= 0, quantity == 0, or symbol is empty.
-    OrderAck addOrder(const OrderRequest& request);
+    OrderAck addOrder(const OrderRequest& request) noexcept;
 
     // --------------------------------------------------------
     //  Order Cancellation
@@ -65,7 +65,7 @@ public:
     /// listener->onOrderUpdate() with status = Cancelled.
     ///
     /// Returns true if cancelled, false if order not found or already filled.
-    bool cancelOrder(uint64_t order_id);
+    bool cancelOrder(uint64_t order_id) noexcept;
 
     // --------------------------------------------------------
     //  Order Amendment
@@ -83,7 +83,7 @@ public:
     ///   - After amendment, the order MAY match against the opposite side
     ///
     /// Returns true if amended, false if order not found or invalid parameters.
-    bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity);
+    bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) noexcept;
 
     // --------------------------------------------------------
     //  Query (for testing / debugging -- NOT performance-critical)

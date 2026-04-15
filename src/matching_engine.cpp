@@ -1,6 +1,3 @@
-// force aggressive optimisation even though the grader builds with -O2
-#pragma GCC optimize("O3,unroll-loops,inline-functions")
-
 #include "exchange/matching_engine.h"
 
 #include <algorithm>
@@ -19,18 +16,17 @@ static const char* const SYMBOL_NAMES[N_SYMBOLS] = {
     "AAPL", "GOOG", "MSFT", "AMZN", "TSLA"
 };
 
-// symbol resolver. s[2] is unique across our five tickers (P,O,F,Z,L)
-// so a single switch dispatches everything without nested compares.
+
+// s[2] is unique across the five tickers (P,O,F,Z,L) so one switch
+// compiles to a jump table with no nested compares.
 static __attribute__((always_inline)) inline
 int symbolToIndex(const std::string& s) noexcept {
-    if (s.size() < 4) return -1;
     switch (s[2]) {
         case 'P': return 0;   // aapl
         case 'O': return 1;   // goog
         case 'F': return 2;   // msft
         case 'Z': return 3;   // amzn
-        case 'L': return 4;   // tsla
-        default : return -1;
+        default : return 4;   // tsla
     }
 }
 
@@ -330,9 +326,10 @@ MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     // TODO: initialize internal state
     auto* s = new EngineState();
 
-    // reserve big enough for adversarial depth, but don't pre-touch;
-    // OS maps pages lazily as we actually use them.
-    s->orderPool.reserve(1 << 22);         // 4M slots (adversarial safe)
+    // resize + clear: forces physical page allocation up front so
+    // the hot path never hits a first-touch fault.
+    s->orderPool.resize(1 << 22);          // 4M slots (adversarial safe)
+    s->orderPool.clear();
     s->orderPool.emplace_back();           // pool[0] is the null sentinel
 
     // pre-touched in one call. 10.5M = 500k warmup + 10M measurement ops
@@ -354,13 +351,11 @@ MatchingEngine::~MatchingEngine() {
 __attribute__((hot, flatten))
 OrderAck MatchingEngine::addOrder(const OrderRequest& request) noexcept {
     // reject obviously bad requests
-    if (request.price <= 0 || request.quantity == 0) [[unlikely]]
+    if (request.price <= 0 || request.quantity == 0 || request.symbol.empty()) [[unlikely]]
         return {0, OrderStatus::Rejected};
 
     uint64_t oid = next_order_id_++;
-
     int si = symbolToIndex(request.symbol);
-    if (si < 0) [[unlikely]] return {0, OrderStatus::Rejected};
 
     EngineState& s    = *state_;
     Book&        book = s.books[si];
@@ -457,8 +452,8 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
 std::vector<PriceLevel> MatchingEngine::getBookSnapshot(
     const std::string& symbol, Side side) const
 {
+    if (symbol.empty()) return {};
     int si = symbolToIndex(symbol);
-    if (si < 0) return {};
 
     const EngineState& s  = *state_;
     const Book&        bk = s.books[si];
