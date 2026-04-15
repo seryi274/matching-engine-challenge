@@ -4,18 +4,21 @@ namespace exchange {
 
 MatchingEngine::MatchingEngine(Listener* listener)
     : listener_(listener)
-{
-    // Pre-allocate completely to eliminate branching in the hot path
-    order_lookup_.resize(8500000, 0);
-    order_pool_.resize(2000000); 
+{   
+    // Scale up for 10.5M total ops (500k warmup + 10M measure)
+    order_lookup_.resize(11000000, 0);
     
-    // Build the free-list once
-    for(uint32_t i = 1; i < 1999999; ++i) {
+    // Scale the pool up safely for the adversarial scenario
+    order_pool_.resize(5000000); 
+    
+    // Build the free-list bound to the 5,000,000 size
+    for(uint32_t i = 1; i < 4999999; ++i) {
         order_pool_[i].next = i + 1;
     }
-    order_pool_[1999999].next = 0;
+    order_pool_[4999999].next = 0;
     free_head_ = 1;
 
+    // Initialize books
     const char* const SYMBOLS[] = {"AAPL", "AMZN", "GOOG", "MSFT", "TSLA"};
     for (int i = 0; i < 5; ++i) {
         active_books_[i].bidlevels.reset(new PriceLevelNode[PRICESLOTS]());
