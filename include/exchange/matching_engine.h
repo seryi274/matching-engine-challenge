@@ -41,17 +41,6 @@ public:
     // --------------------------------------------------------
 
     /// Submit a new limit order.
-    ///
-    /// The engine:
-    ///   1. Assigns a unique order_id (monotonically increasing, starting at 1)
-    ///   2. Attempts to match against resting orders on the opposite side
-    ///   3. Calls listener->onTrade() for each execution
-    ///   4. Calls listener->onOrderUpdate() for each affected resting order
-    ///   5. Calls listener->onOrderUpdate() for the incoming order
-    ///   6. If any quantity remains, rests the order on the book
-    ///   7. Returns an OrderAck with the assigned order_id and status
-    ///
-    /// Reject if: price <= 0, quantity == 0, or symbol is empty.
     OrderAck addOrder(const OrderRequest& request);
 
     // --------------------------------------------------------
@@ -59,11 +48,6 @@ public:
     // --------------------------------------------------------
 
     /// Cancel a resting order by its order_id.
-    ///
-    /// If found and still resting, remove from book and call
-    /// listener->onOrderUpdate() with status = Cancelled.
-    ///
-    /// Returns true if cancelled, false if order not found or already filled.
     bool cancelOrder(uint64_t order_id);
 
     // --------------------------------------------------------
@@ -71,17 +55,6 @@ public:
     // --------------------------------------------------------
 
     /// Modify a resting order's price and/or quantity.
-    ///
-    /// Rules:
-    ///   - Order must exist and be resting on the book
-    ///   - Side and symbol cannot change
-    ///   - If price changes: order LOSES time priority
-    ///   - If only quantity decreases (price unchanged): KEEPS time priority
-    ///   - If quantity increases (even if price unchanged): LOSES time priority
-    ///   - new_quantity must be > 0, new_price must be > 0
-    ///   - After amendment, the order MAY match against the opposite side
-    ///
-    /// Returns true if amended, false if order not found or invalid parameters.
     bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity);
 
     // --------------------------------------------------------
@@ -89,32 +62,12 @@ public:
     // --------------------------------------------------------
 
     /// Get a snapshot of one side of the book for a given symbol.
-    /// Buy side:  highest price first (best bid at front)
-    /// Sell side: lowest price first  (best ask at front)
     std::vector<PriceLevel> getBookSnapshot(const std::string& symbol, Side side) const;
 
     /// Get total number of live (resting) orders across all symbols.
     uint64_t getOrderCount() const;
 
 private:
-    // ============================================================
-    //  STUDENT: Add your data structures here.
-    //
-    //  Suggested starting point (naive but correct):
-    //    - std::unordered_map<std::string, OrderBook> books_
-    //      where OrderBook contains two std::map<int64_t, std::list<Order>>
-    //      (one for bids sorted descending, one for asks sorted ascending)
-    //    - std::unordered_map<uint64_t, pointer/iterator> order_lookup_
-    //      for O(1) cancel/amend by order_id
-    //
-    //  Better approaches to explore:
-    //    - Flat sorted arrays with binary search
-    //    - Custom memory pools / arena allocators
-    //    - Cache-aligned price level nodes
-    //    - Intrusive linked lists
-    //    - Pre-allocated order arrays with free lists
-    // ============================================================
-
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
     uint64_t  liveorderscount = 0;
@@ -138,12 +91,12 @@ private:
     };
 
     struct alignas(64) OrderBook {
+        uint64_t bid_bits[815]; // 52001 / 64 = 812. Safe margin 815.
+        uint64_t ask_bits[815];
         PriceLevelNode bidlevels[MAXPRICE + 2];
         PriceLevelNode asklevels[MAXPRICE + 2];
         int64_t bestbid = NOBID;
         int64_t bestask = NOASK;
-        uint32_t livebidlevels = 0;
-        uint32_t liveasklevels = 0;
         std::string symbol;
         Trade tradebuf;
     };
@@ -151,8 +104,6 @@ private:
     OrderBook* __restrict__ active_books_ = nullptr;
     uint64_t* __restrict__ order_lookup_ = nullptr;
     OrderNode* __restrict__ order_pool_   = nullptr;
-    
-    // Intrusive Free List Head
     uint32_t free_head_ = 1;
 
     inline uint64_t packLookup(uint32_t pool_idx, int64_t price, uint8_t bookidx, Side side) const noexcept {
