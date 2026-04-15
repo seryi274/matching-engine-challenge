@@ -249,7 +249,8 @@ MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     auto st = std::make_unique<State>();
     // Pre-allocate and pre-touch all memory so the hot path has no page faults.
     // Pre-touch: resize to force physical page allocation, then clear.
-    st->pool.resize(1<<20);
+    // 1<<22 = 4M slots covers adversarial peak depth without reallocs.
+    st->pool.resize(1<<22);
     st->pool.clear();
     st->pool.emplace_back();              // pool[0] = null sentinel
     // Raw heap array, zero-initialized, pre-touched via explicit memset to ensure pages are mapped.
