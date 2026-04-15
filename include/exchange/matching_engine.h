@@ -83,11 +83,14 @@ private:
         uint32_t tail = 0;
     };
 
+    // Exactly 16 bytes. No 'prev' pointer. Metadata packed into padding.
     struct alignas(16) OrderNode { 
         uint32_t id;
-        uint32_t quantity;
+        uint32_t qty;
         uint32_t next;
-        uint32_t prev;
+        uint16_t price;
+        uint8_t  bookidx;
+        Side     side;
     };
 
     struct alignas(64) OrderBook {
@@ -102,20 +105,11 @@ private:
     };
 
     OrderBook* __restrict__ active_books_ = nullptr;
-    uint64_t* __restrict__ order_lookup_ = nullptr;
+    uint32_t* __restrict__ order_lookup_ = nullptr;
     OrderNode* __restrict__ order_pool_   = nullptr;
-    uint32_t free_head_ = 1;
-
-    inline uint64_t packLookup(uint32_t pool_idx, int64_t price, uint8_t bookidx, Side side) const noexcept {
-        return (uint64_t)pool_idx | ((uint64_t)price << 32) | ((uint64_t)bookidx << 60) | ((uint64_t)(side == Side::Buy ? 1 : 0) << 63);
-    }
-    inline uint32_t unpackPoolIdx(uint64_t l) const noexcept { return (uint32_t)l; }
-    inline int64_t  unpackPrice(uint64_t l) const noexcept   { return (int64_t)((l >> 32) & 0xFFFFFFF); }
-    inline uint8_t  unpackBookIdx(uint64_t l) const noexcept { return (uint8_t)((l >> 60) & 0x7); }
-    inline Side     unpackSide(uint64_t l) const noexcept    { return (l >> 63) ? Side::Buy : Side::Sell; }
+    uint32_t next_pool_idx_ = 1; // Pure Bump Allocator
 
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
-    inline void removeOrder(OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price, Side side) noexcept;
     void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
     void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
 };
