@@ -256,7 +256,7 @@ def get_leaderboard() -> list[dict[str, Any]]:
         SELECT *,
                ROW_NUMBER() OVER (
                    PARTITION BY team_name
-                   ORDER BY weighted_p50_ns ASC
+                   ORDER BY weighted_throughput_ops DESC
                ) AS rn
           FROM scored
     )
@@ -268,7 +268,7 @@ def get_leaderboard() -> list[dict[str, Any]]:
            submission_id
       FROM best
      WHERE rn = 1
-     ORDER BY weighted_p50_ns ASC
+     ORDER BY weighted_throughput_ops DESC
     """
     with _db_lock:
         conn = _connect()
