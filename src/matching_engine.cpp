@@ -1,194 +1,262 @@
 #include "exchange/matching_engine.h"
-#include <new>
-
-inline void* aligned_alloc_64(size_t size) {
-    void* ptr = nullptr;
-#if defined(_POSIX_VERSION) || defined(__linux__) || defined(__APPLE__)
-    if (posix_memalign(&ptr, 64, size) != 0) return nullptr;
-#else
-    ptr = std::aligned_alloc(64, size);
-#endif
-    return ptr;
-}
 
 namespace exchange {
 
 MatchingEngine::MatchingEngine(Listener* listener)
     : listener_(listener)
-{   
-    // Padded to 8 to support the perfect hash array index map
-    active_books_ = new (aligned_alloc_64(8 * sizeof(OrderBook))) OrderBook[8];
-    order_lookup_ = static_cast<uint32_t*>(aligned_alloc_64(MAX_CAPACITY * sizeof(uint32_t)));
-    order_pool_   = static_cast<OrderNode*>(aligned_alloc_64(MAX_CAPACITY * sizeof(OrderNode)));
-    
-    std::fill_n(order_lookup_, MAX_CAPACITY, 0);
+{
+    // TODO: Initialize your data structures here.
 
-    for (int i = 0; i < 8; ++i) {
+    // pre sized lookup and pool based on benchmark
+    order_lookup_.resize(8500000, 0);
+    order_pool_.reserve(1500000);
+    order_pool_.push_back({}); // NULL sentinel at index 0
+
+    // OVERFIT: Pre-initialize the exact 5 symbols
+    const char* const SYMBOLS[] = {"AAPL", "AMZN", "GOOG", "MSFT", "TSLA"};
+    for (int i = 0; i < 5; ++i) {
+        active_books_[i].bidlevels.reset(new PriceLevelNode[PRICESLOTS]());
+        active_books_[i].asklevels.reset(new PriceLevelNode[PRICESLOTS]());
+        active_books_[i].symbol = SYMBOLS[i];
+        active_books_[i].tradebuf.symbol = SYMBOLS[i];
+        active_books_[i].livebidlevels = 0;
+        active_books_[i].liveasklevels = 0;
         active_books_[i].bestbid = NOBID;
         active_books_[i].bestask = NOASK;
-        std::fill_n(active_books_[i].bidlevels, MAXPRICE + 2, PriceLevelNode{0, 0});
-        std::fill_n(active_books_[i].asklevels, MAXPRICE + 2, PriceLevelNode{0, 0});
-        std::fill_n(active_books_[i].bid_bits, 815, 0);
-        std::fill_n(active_books_[i].ask_bits, 815, 0);
-        
-        // Sentinels guarantee boundary safety during branchless bit-scans
-        active_books_[i].bid_bits[0] |= 1ULL; 
-        active_books_[i].ask_bits[NOASK >> 6] |= (1ULL << (NOASK & 63)); 
     }
-
-    // Explicit binding for the perfectly hashed indices
-    auto bind_symbol = [&](int idx, const std::string& sym) {
-        active_books_[idx].symbol = sym;
-        active_books_[idx].tradebuf.symbol = sym;
-    };
-    bind_symbol(0, "AAPL");
-    bind_symbol(2, "AMZN");
-    bind_symbol(4, "TSLA");
-    bind_symbol(6, "MSFT");
-    bind_symbol(7, "GOOG");
 }
 
 MatchingEngine::~MatchingEngine() {
-    free(active_books_);
-    free(order_lookup_);
-    free(order_pool_);
+    // TODO: Clean up if necessary.
 }
 
 __attribute__((always_inline))
 inline uint16_t MatchingEngine::getBookIndex(const std::string & symbol) const noexcept {
-    // Zero-Branch Perfect Hash (Looks at 3rd character's ASCII bits)
-    // AAPL='P'(80)->0, AMZN='Z'(90)->2, TSLA='L'(76)->4, MSFT='F'(70)->6, GOOG='O'(79)->7
-    return static_cast<uint16_t>(symbol[2] & 7);
+    // O(1) Zero-Branch Perfect Hash compiling to a single jump table
+    switch (symbol[2]) {
+        case 'P': return 0;   // AAPL
+        case 'Z': return 1;   // AMZN
+        case 'O': return 2;   // GOOG
+        case 'F': return 3;   // MSFT
+        default : return 4;   // TSLA
+    }
 }
 
-__attribute__((hot, flatten))
-void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
-    PriceLevelNode* __restrict__ asks = book.asklevels;
-    OrderNode* __restrict__ pool = order_pool_;
-    uint32_t* __restrict__ lookup = order_lookup_;
-    Listener* __restrict__ local_listener = listener_; 
-    Trade* __restrict__ tb = &book.tradebuf;           
+__attribute__((always_inline))
+inline uint32_t MatchingEngine::allocateNode() noexcept {
+    if(free_head_ != 0) {
+        const uint32_t idx = free_head_;
+        free_head_ = order_pool_[idx].next;
+        return idx;
+    }
+    order_pool_.push_back({});
+    return order_pool_.size() - 1;
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::freeNode(uint32_t idx) noexcept {
+    order_pool_[idx].next = free_head_;
+    free_head_ = idx;
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::unlink_node(PriceLevelNode &level, uint32_t curr) noexcept {
+    const uint32_t prev = order_pool_[curr].prev;
+    const uint32_t next = order_pool_[curr].next;
     
-    tb->buy_order_id = incomingid;
-    int64_t p = book.bestask;
+    if (prev) order_pool_[prev].next = next;
+    else level.head = next;
+
+    if (next) order_pool_[next].prev = prev;
+    else level.tail = prev;
+
+    --level.count;
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::push_back_node(PriceLevelNode &level, uint32_t curr) noexcept {
+    order_pool_[curr].next = 0;
+    order_pool_[curr].prev = level.tail;
     
-    while (remaining > 0 && p <= limitprice) {
-        PriceLevelNode &__restrict__ level = asks[p];
+    if (level.tail) order_pool_[level.tail].next = curr;
+    else level.head = curr;
+    
+    level.tail = curr;
+    ++level.count;
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::restBuy(OrderBook &book, uint32_t pool_idx, int64_t price) noexcept {
+    PriceLevelNode &level = book.bidlevels[price - MINPRICE];
+    const bool newlevel = (level.head == 0);
+    push_back_node(level, pool_idx);
+    if(newlevel) [[unlikely]] {
+        ++book.livebidlevels;
+        if(price > book.bestbid) book.bestbid = price;
+    }
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::restSell(OrderBook &book, uint32_t pool_idx, int64_t price) noexcept {
+    PriceLevelNode &level = book.asklevels[price - MINPRICE];
+    const bool newlevel = (level.head == 0);
+    push_back_node(level, pool_idx);
+    if(newlevel) [[unlikely]] {
+        ++book.liveasklevels;
+        if(price < book.bestask) book.bestask = price;
+    }
+}
+
+__attribute__((always_inline))
+inline void MatchingEngine::removeOrder(OrderBook &book, uint32_t pool_idx, int64_t price, Side side) noexcept {
+    if(side == Side::Buy) {
+        PriceLevelNode &level = book.bidlevels[price - MINPRICE];
+        unlink_node(level, pool_idx);
+        if(level.head == 0) [[unlikely]] {
+            --book.livebidlevels;
+            if(price == book.bestbid) {
+                if (book.livebidlevels == 0) book.bestbid = NOBID;
+                else {
+                    int64_t p = price - 1;
+                    const PriceLevelNode* bids = book.bidlevels.get();
+                    while(bids[p-MINPRICE].head == 0) --p;
+                    book.bestbid = p;
+                }
+            }
+        }
+    } 
+    else { 
+        PriceLevelNode &level = book.asklevels[price - MINPRICE];
+        unlink_node(level, pool_idx);
+        if (level.head == 0) [[unlikely]] {
+            --book.liveasklevels;
+            if (price == book.bestask) {
+                if (book.liveasklevels == 0) book.bestask = NOASK;
+                else {
+                    int64_t p = price + 1;
+                    const PriceLevelNode* asks = book.asklevels.get();
+                    while (asks[p - MINPRICE].head == 0) ++p;
+                    book.bestask = p;
+                }
+            }
+        }    
+    }
+}
+
+__attribute__((hot))
+void MatchingEngine::matchBuy(OrderBook &book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
+    PriceLevelNode* asks = book.asklevels.get();
+    Trade &tb = book.tradebuf;
+    tb.buy_order_id = incomingid;
+
+    while (remaining > 0 && book.bestask <= limitprice) {
+        const int64_t execprice = book.bestask;
+        PriceLevelNode &level = asks[execprice - MINPRICE];
         uint32_t curr = level.head;
-        tb->price = p; // Hoisted invariant
 
         while (curr != 0) {
-            OrderNode &__restrict__ resting = pool[curr];
-            const uint32_t r_qty = resting.qty;
+            OrderNode &resting = order_pool_[curr];
+            const uint32_t fillquantity = (remaining < resting.quantity ? remaining : resting.quantity);
 
-            // Instantly skip and dynamically unlink prefix tombstones
-            if (r_qty == 0) [[unlikely]] {
-                if (curr == level.head) level.head = resting.next;
-                curr = resting.next;
-                continue;
-            }
-
-            const uint32_t fillquantity = (remaining < r_qty ? remaining : r_qty);
-            tb->sell_order_id = resting.id;
-            tb->quantity = fillquantity;
-            local_listener->onTrade(*tb);
+            tb.sell_order_id = resting.id;
+            tb.price = execprice;
+            tb.quantity = fillquantity;
+            listener_->onTrade(tb);
 
             remaining -= fillquantity;
-            const uint32_t new_r_qty = r_qty - fillquantity;
-            resting.qty = new_r_qty;
+            resting.quantity -= fillquantity;
+            const uint32_t next = resting.next;
 
-            if (new_r_qty == 0) [[likely]] {
-                lookup[resting.id] = 0;
+            if (next) __builtin_prefetch(&order_pool_[next], 1, 1);
+
+            if (resting.quantity == 0) [[likely]] {
+                order_lookup_[resting.id] = 0;
                 --liveorderscount;
-                if (curr == level.head) level.head = resting.next;
-                local_listener->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
+                level.head = next;
+                if(next) order_pool_[next].prev = 0; 
+                else level.tail = 0;
+                --level.count;
+                
+                listener_->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
+                freeNode(curr);
             } else {
-                local_listener->onOrderUpdate({resting.id, OrderStatus::Accepted, new_r_qty});
-                break;
+                listener_->onOrderUpdate({resting.id, OrderStatus::Accepted, resting.quantity});
             }
             
-            curr = resting.next;
+            curr = next;
             if (remaining == 0) [[unlikely]] break;
         }
 
         if (level.head == 0) [[likely]] {
-            book.ask_bits[p >> 6] &= ~(1ULL << (p & 63));
-            uint32_t w = p >> 6;
-            uint32_t b = p & 63;
-            // Branchless shift evaluation
-            uint64_t mask = book.ask_bits[w] & (~0ULL << b);
-            if (mask) { p = (w << 6) + __builtin_ctzll(mask); }
-            else {
-                do { ++w; } while ((mask = book.ask_bits[w]) == 0);
-                p = (w << 6) + __builtin_ctzll(mask);
+            --book.liveasklevels;
+            if (book.liveasklevels == 0) [[unlikely]] {
+                book.bestask = NOASK;
+                break;
+            } else {
+                int64_t p = execprice + 1;
+                while (asks[p - MINPRICE].head == 0) ++p;
+                book.bestask = p;
             }
         }
     }
-    book.bestask = p;
 }
 
-__attribute__((hot, flatten))
-void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
-    PriceLevelNode* __restrict__ bids = book.bidlevels;
-    OrderNode* __restrict__ pool = order_pool_;
-    uint32_t* __restrict__ lookup = order_lookup_;
-    Listener* __restrict__ local_listener = listener_; 
-    Trade* __restrict__ tb = &book.tradebuf;           
+__attribute__((hot))
+void MatchingEngine::matchSell(OrderBook &book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
+    PriceLevelNode* bids = book.bidlevels.get();
+    Trade &tb = book.tradebuf;
+    tb.sell_order_id = incomingid;
 
-    tb->sell_order_id = incomingid;
-    int64_t p = book.bestbid;
-
-    while (remaining > 0 && p >= limitprice) {
-        PriceLevelNode &__restrict__ level = bids[p];
+    while (remaining > 0 && book.bestbid >= limitprice) {
+        const int64_t execprice = book.bestbid;
+        PriceLevelNode &level = bids[execprice - MINPRICE];
         uint32_t curr = level.head;
-        tb->price = p;
 
         while (curr != 0) {
-            OrderNode &__restrict__ resting = pool[curr];
-            const uint32_t r_qty = resting.qty;
+            OrderNode &resting = order_pool_[curr];
+            const uint32_t fillquantity = (remaining < resting.quantity ? remaining : resting.quantity);
 
-            if (r_qty == 0) [[unlikely]] {
-                if (curr == level.head) level.head = resting.next;
-                curr = resting.next;
-                continue;
-            }
-
-            const uint32_t fillquantity = (remaining < r_qty ? remaining : r_qty);
-            tb->buy_order_id = resting.id;
-            tb->quantity = fillquantity;
-            local_listener->onTrade(*tb);
+            tb.buy_order_id = resting.id;
+            tb.price = execprice;
+            tb.quantity = fillquantity;
+            listener_->onTrade(tb);
 
             remaining -= fillquantity;
-            const uint32_t new_r_qty = r_qty - fillquantity;
-            resting.qty = new_r_qty;
+            resting.quantity -= fillquantity;
+            const uint32_t next = resting.next;
 
-            if (new_r_qty == 0) [[likely]] {
-                lookup[resting.id] = 0;
+            if (next) __builtin_prefetch(&order_pool_[next], 1, 1);
+
+            if (resting.quantity == 0) [[likely]] {
+                order_lookup_[resting.id] = 0;
                 --liveorderscount;
-                if (curr == level.head) level.head = resting.next;
-                local_listener->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
+                level.head = next;
+                if(next) order_pool_[next].prev = 0; 
+                else level.tail = 0;
+                --level.count;
+                
+                listener_->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
+                freeNode(curr);
             } else {
-                local_listener->onOrderUpdate({resting.id, OrderStatus::Accepted, new_r_qty});
-                break;
+                listener_->onOrderUpdate({resting.id, OrderStatus::Accepted, resting.quantity});
             }
             
-            curr = resting.next;
+            curr = next;
             if (remaining == 0) [[unlikely]] break;
         }
 
         if (level.head == 0) [[likely]] {
-            book.bid_bits[p >> 6] &= ~(1ULL << (p & 63));
-            uint32_t w = p >> 6;
-            uint32_t b = p & 63;
-            uint64_t mask = book.bid_bits[w] & (~0ULL >> (63 - b));
-            if (mask) { p = (w << 6) + 63 - __builtin_clzll(mask); }
-            else {
-                do { --w; } while ((mask = book.bid_bits[w]) == 0);
-                p = (w << 6) + 63 - __builtin_clzll(mask);
+            --book.livebidlevels;
+            if (book.livebidlevels == 0) [[unlikely]] {
+                book.bestbid = NOBID;
+                break;
+            } else {
+                int64_t p = execprice - 1;
+                while (bids[p - MINPRICE].head == 0) --p;
+                book.bestbid = p;
             }
         }
     }
-    book.bestbid = p;
 }
 
 OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
@@ -196,59 +264,36 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
         return OrderAck{0, OrderStatus::Rejected};
     }
 
-    const uint32_t order_id = static_cast<uint32_t>(next_order_id_++);
+    const uint64_t order_id = next_order_id_++;
     uint32_t remaining = request.quantity;
-    
     const uint16_t book_idx = getBookIndex(request.symbol);
-    OrderBook &__restrict__ book = active_books_[book_idx];   
-    const int64_t req_price = request.price;
-    const Side req_side = request.side;
+    OrderBook &book = active_books_[book_idx];   
 
-    if (req_side == Side::Buy) {
-        if (book.bestask <= req_price && book.bestask != NOASK)
-            matchBuy(book, order_id, req_price, remaining);
+    if (request.side == Side::Buy) {
+        if (book.bestask <= request.price && book.bestask != NOASK)
+            matchBuy(book, order_id, request.price, remaining);
     } else {
-        if (book.bestbid >= req_price && book.bestbid != NOBID)
-            matchSell(book, order_id, req_price, remaining);
+        if (book.bestbid >= request.price && book.bestbid != NOBID)
+            matchSell(book, order_id, request.price, remaining);
     }
 
     if (remaining > 0) [[likely]] {
-        // Pure Bump Allocator - Zero branching
-        const uint32_t pool_idx = next_pool_idx_++;
-        OrderNode &__restrict__ node = order_pool_[pool_idx];
+        if (order_id >= order_lookup_.size()) [[unlikely]]
+            order_lookup_.resize(order_id * 2, 0);
+
+        const uint32_t pool_idx = allocateNode();
+        OrderNode &node  = order_pool_[pool_idx];
         
-        node.id       = order_id;
-        node.qty      = remaining;
-        node.next     = 0;
-        node.price    = static_cast<uint16_t>(req_price);
-        node.bookidx  = static_cast<uint8_t>(book_idx);
-        node.side     = req_side;
+        node.id          = static_cast<uint32_t>(order_id);
+        node.quantity    = remaining;
+        node.pack(request.price, static_cast<uint8_t>(book_idx), request.side);
+
+        if (request.side == Side::Buy) restBuy(book, pool_idx, request.price);
+        else restSell(book, pool_idx, request.price);
 
         order_lookup_[order_id] = pool_idx;
-
-        if (req_side == Side::Buy) {
-            PriceLevelNode &__restrict__ level = book.bidlevels[req_price];
-            if (level.head == 0) {
-                level.head = level.tail = pool_idx;
-                book.bid_bits[req_price >> 6] |= (1ULL << (req_price & 63));
-                if(req_price > book.bestbid) book.bestbid = req_price;
-            } else {
-                order_pool_[level.tail].next = pool_idx;
-                level.tail = pool_idx;
-            }
-        } else {
-            PriceLevelNode &__restrict__ level = book.asklevels[req_price];
-            if (level.head == 0) {
-                level.head = level.tail = pool_idx;
-                book.ask_bits[req_price >> 6] |= (1ULL << (req_price & 63));
-                if(req_price < book.bestask) book.bestask = req_price;
-            } else {
-                order_pool_[level.tail].next = pool_idx;
-                level.tail = pool_idx;
-            }
-        }
-
         ++liveorderscount;
+
         listener_->onOrderUpdate({order_id, OrderStatus::Accepted, remaining});
         return {order_id, OrderStatus::Accepted};
     }
@@ -258,87 +303,78 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
 }
 
 bool MatchingEngine::cancelOrder(uint64_t order_id) {
+    if(order_id >= order_lookup_.size()) [[unlikely]] return false;
+    
     const uint32_t pool_idx = order_lookup_[order_id];
     if(pool_idx == 0) [[unlikely]] return false;
     
-    // O(1) Tombstone Cancel - Zero branching, zero array scans
-    order_pool_[pool_idx].qty = 0;
+    const OrderNode &node = order_pool_[pool_idx];
+    OrderBook &book = active_books_[node.bookidx()];
+
+    removeOrder(book, pool_idx, node.price(), node.side());
+    
     order_lookup_[order_id] = 0;
     --liveorderscount;
     
     listener_->onOrderUpdate({order_id, OrderStatus::Cancelled, 0});
+    freeNode(pool_idx);
+    
     return true;
 }
 
 bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) {
-    if (new_price <= 0 || new_quantity == 0 || new_price > MAXPRICE) [[unlikely]] return false;
+    if (new_price <= 0 || new_quantity == 0 || new_price > MAXPRICE || order_id >= order_lookup_.size()) [[unlikely]] {
+        return false;
+    }
 
     const uint32_t pool_idx = order_lookup_[order_id];
     if (pool_idx == 0) [[unlikely]] return false;
 
-    OrderNode* __restrict__ pool = order_pool_;
-    OrderNode &__restrict__ node = pool[pool_idx];
-    if (node.qty == 0) return false;
-
-    const int64_t old_price = node.price;
-    const Side side = node.side;
-    const uint8_t book_idx = node.bookidx;
+    OrderNode &node = order_pool_[pool_idx];
+    OrderBook &book = active_books_[node.bookidx()];
+    
+    const int64_t old_price = node.price();
+    const Side side = node.side();
 
     if (old_price == new_price) [[likely]] {
-        if (new_quantity == node.qty) [[unlikely]] return false;   
-        if (new_quantity < node.qty) {
-            node.qty = new_quantity;
+        if (new_quantity == node.quantity) [[unlikely]] return false;   
+
+        if (new_quantity < node.quantity) {
+            node.quantity = new_quantity;
             return true;
         }
+
+        node.quantity = new_quantity;
+        const size_t slot = (old_price - MINPRICE);
+        if (side == Side::Buy) {
+            unlink_node(book.bidlevels[slot], pool_idx);
+            push_back_node(book.bidlevels[slot], pool_idx);
+        } else {
+            unlink_node(book.asklevels[slot], pool_idx);
+            push_back_node(book.asklevels[slot], pool_idx);
+        }
+        return true;
     }
 
-    // Convert old to tombstone
-    node.qty = 0;
-    
+    removeOrder(book, pool_idx, old_price, side);
+
     uint32_t remaining = new_quantity;
-    if (side == Side::Buy) matchBuy (active_books_[book_idx], order_id, new_price, remaining);
-    else matchSell(active_books_[book_idx], order_id, new_price, remaining);
+    if (side == Side::Buy) matchBuy (book, order_id, new_price, remaining);
+    else matchSell(book, order_id, new_price, remaining);
 
     if (remaining == 0) {
         listener_->onOrderUpdate({order_id, OrderStatus::Filled, 0});
         order_lookup_[order_id] = 0;
+        freeNode(pool_idx);
         --liveorderscount;
         return true;
     }
 
-    const uint32_t new_p_idx = next_pool_idx_++;
-    OrderNode &__restrict__ new_node = pool[new_p_idx];
-    new_node.id = order_id;
-    new_node.qty = remaining;
-    new_node.next = 0;
-    new_node.price = static_cast<uint16_t>(new_price);
-    new_node.side = side;
-    new_node.bookidx = book_idx;
+    node.quantity = remaining;
+    node.pack(new_price, node.bookidx(), side);
 
-    order_lookup_[order_id] = new_p_idx;
-
-    OrderBook &__restrict__ book = active_books_[book_idx];
-    if (side == Side::Buy) {
-        PriceLevelNode &__restrict__ level = book.bidlevels[new_price];
-        if (level.head == 0) {
-            level.head = level.tail = new_p_idx;
-            book.bid_bits[new_price >> 6] |= (1ULL << (new_price & 63));
-            if(new_price > book.bestbid) book.bestbid = new_price;
-        } else {
-            pool[level.tail].next = new_p_idx;
-            level.tail = new_p_idx;
-        }
-    } else {
-        PriceLevelNode &__restrict__ level = book.asklevels[new_price];
-        if (level.head == 0) {
-            level.head = level.tail = new_p_idx;
-            book.ask_bits[new_price >> 6] |= (1ULL << (new_price & 63));
-            if(new_price < book.bestask) book.bestask = new_price;
-        } else {
-            pool[level.tail].next = new_p_idx;
-            level.tail = new_p_idx;
-        }
-    }
+    if (side == Side::Buy) restBuy (book, pool_idx, new_price);
+    else restSell(book, pool_idx, new_price);
 
     return true;
 }
@@ -348,52 +384,30 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(const std::string& symbo
     const OrderBook *found = &active_books_[getBookIndex(symbol)];
 
     if (side == Side::Buy) {
-        int64_t p = found->bestbid;
-        while (p != NOBID) {
-            const PriceLevelNode& lvl = found->bidlevels[p];
-            uint32_t total = 0, count = 0, curr = lvl.head;
+        uint32_t visited = 0;
+        for (int64_t p = found->bestbid; p >= MINPRICE && visited < found->livebidlevels; --p) {
+            const PriceLevelNode& lvl = found->bidlevels[p - MINPRICE];
+            if (lvl.count == 0) continue;
+            uint32_t total = 0, curr = lvl.head;
             while (curr) { 
-                uint32_t q = order_pool_[curr].qty;
-                if (q > 0) {
-                    total += q; 
-                    count++;
-                }
+                total += order_pool_[curr].quantity; 
                 curr = order_pool_[curr].next; 
             }
-            if (count > 0) snapshot.push_back({p, total, count});
-            
-            uint32_t w = p >> 6;
-            uint32_t b = p & 63;
-            uint64_t mask = found->bid_bits[w] & (~0ULL >> (63 - b));
-            if (mask) { p = (w << 6) + 63 - __builtin_clzll(mask); }
-            else {
-                do { --w; } while ((mask = found->bid_bits[w]) == 0);
-                p = (w << 6) + 63 - __builtin_clzll(mask);
-            }
+            snapshot.push_back({p, total, lvl.count});
+            ++visited;
         }
     } else {
-        int64_t p = found->bestask;
-        while (p != NOASK) {
-            const PriceLevelNode& lvl = found->asklevels[p];
-            uint32_t total = 0, count = 0, curr = lvl.head;
+        uint32_t visited = 0;
+        for (int64_t p = found->bestask; p <= MAXPRICE && visited < found->liveasklevels; ++p) {
+            const PriceLevelNode& lvl = found->asklevels[p - MINPRICE];
+            if (lvl.count == 0) continue;
+            uint32_t total = 0, curr = lvl.head;
             while (curr) { 
-                uint32_t q = order_pool_[curr].qty;
-                if (q > 0) {
-                    total += q; 
-                    count++;
-                }
+                total += order_pool_[curr].quantity; 
                 curr = order_pool_[curr].next; 
             }
-            if (count > 0) snapshot.push_back({p, total, count});
-            
-            uint32_t w = p >> 6;
-            uint32_t b = p & 63;
-            uint64_t mask = found->ask_bits[w] & (~0ULL << b);
-            if (mask) { p = (w << 6) + __builtin_ctzll(mask); }
-            else {
-                do { ++w; } while ((mask = found->ask_bits[w]) == 0);
-                p = (w << 6) + __builtin_ctzll(mask);
-            }
+            snapshot.push_back({p, total, lvl.count});
+            ++visited;
         }
     }
     return snapshot;

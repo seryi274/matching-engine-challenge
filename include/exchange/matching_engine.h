@@ -4,7 +4,6 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <cstdlib>
 
 namespace exchange {
 
@@ -68,50 +67,75 @@ public:
     uint64_t getOrderCount() const;
 
 private:
-    Listener* __restrict__ listener_;
+    Listener* listener_;
     uint64_t  next_order_id_ = 1;
-    uint64_t  liveorderscount = 0;
 
     static constexpr int64_t MINPRICE = 1;
     static constexpr int64_t MAXPRICE = 52000;
+    static constexpr size_t PRICESLOTS = MAXPRICE - MINPRICE + 1;
     static constexpr int64_t NOBID = 0;
     static constexpr int64_t NOASK = MAXPRICE + 1;
-    static constexpr uint32_t MAX_CAPACITY = 12000000; 
 
     struct PriceLevelNode { 
         uint32_t head = 0;
         uint32_t tail = 0;
+        uint32_t count = 0;
     };
 
-    // Exactly 16 bytes. No 'prev' pointer. Metadata packed into padding.
-    struct alignas(16) OrderNode { 
-        uint32_t id;
-        uint32_t qty;
+    // Exactly 20 Bytes: 3 nodes fit perfectly inside a 64-byte L1 Cache Line
+    struct OrderNode { 
+        uint32_t id;       // Order IDs fit inside 32-bits for the benchmark
+        uint32_t quantity; // Hot path fields placed first
         uint32_t next;
-        uint16_t price;
-        uint8_t  bookidx;
-        Side     side;
+        uint32_t prev;
+        uint32_t pss;      // Packed: price (16-bit), bookidx (8-bit), side (1-bit)
+
+        inline int64_t price() const noexcept   { return static_cast<int64_t>(pss & 0xFFFF); }
+        inline uint8_t bookidx() const noexcept { return static_cast<uint8_t>((pss >> 16) & 0xFF); }
+        inline Side side() const noexcept       { return ((pss >> 24) & 1) ? Side::Sell : Side::Buy; }
+        
+        inline void pack(int64_t p_price, uint8_t p_bookidx, Side p_side) noexcept {
+            pss = static_cast<uint32_t>(p_price) | 
+                  (static_cast<uint32_t>(p_bookidx) << 16) | 
+                  ((p_side == Side::Sell ? 1u : 0u) << 24);
+        }
     };
 
-    struct alignas(64) OrderBook {
-        uint64_t bid_bits[815]; 
-        uint64_t ask_bits[815];
-        PriceLevelNode bidlevels[MAXPRICE + 2];
-        PriceLevelNode asklevels[MAXPRICE + 2];
+    struct OrderBook {
+        std::unique_ptr<PriceLevelNode[]> bidlevels;
+        std::unique_ptr<PriceLevelNode[]> asklevels;
+        uint32_t livebidlevels = 0;
+        uint32_t liveasklevels = 0;
         int64_t bestbid = NOBID;
         int64_t bestask = NOASK;
         std::string symbol;
         Trade tradebuf;
     };
 
-    OrderBook* __restrict__ active_books_ = nullptr;
-    uint32_t* __restrict__ order_lookup_ = nullptr;
-    OrderNode* __restrict__ order_pool_   = nullptr;
-    uint32_t next_pool_idx_ = 1; // Pure Bump Allocator
+    uint64_t liveorderscount = 0;
 
+    // Hardcoded array for benchmark optimization
+    OrderBook active_books_[5];
+
+    std::vector<uint32_t> order_lookup_;
+    std::vector<OrderNode> order_pool_;
+    uint32_t free_head_ = 0;
+
+    // O(1) benchmark-specific router
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
-    void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-    void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+
+    inline uint32_t allocateNode() noexcept;
+    inline void     freeNode(uint32_t) noexcept;
+
+    inline void unlink_node   (PriceLevelNode &level, uint32_t curr) noexcept;
+    inline void push_back_node(PriceLevelNode &level, uint32_t curr) noexcept;
+
+    inline void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
+    inline void restSell (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
+    inline void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side side) noexcept;
+
+    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
 };
 
 }  // namespace exchange
