@@ -1,7 +1,6 @@
 #include "exchange/matching_engine.h"
 #include <new>
 
-// Helper for cache-aligned allocations across platforms
 inline void* aligned_alloc_64(size_t size) {
     void* ptr = nullptr;
 #if defined(_POSIX_VERSION) || defined(__linux__) || defined(__APPLE__)
@@ -18,20 +17,17 @@ MatchingEngine::MatchingEngine(Listener* listener)
     : listener_(listener)
 {   
     // TODO: Initialize your data structures here.
-
-    // 100% naked contiguous arrays aligned perfectly to L1/L2 hardware cache lines
     active_books_ = new (aligned_alloc_64(5 * sizeof(OrderBook))) OrderBook[5];
     order_lookup_ = static_cast<uint64_t*>(aligned_alloc_64(MAX_CAPACITY * sizeof(uint64_t)));
     order_pool_   = static_cast<OrderNode*>(aligned_alloc_64(MAX_CAPACITY * sizeof(OrderNode)));
-    free_stack_   = static_cast<uint32_t*>(aligned_alloc_64(MAX_CAPACITY * sizeof(uint32_t)));
     
-    // Build stack array purely mathematically (zero structs, zero indirection)
-    free_top_ = 0;
-    for(uint32_t i = MAX_CAPACITY - 1; i > 0; --i) {
-        free_stack_[free_top_++] = i;
+    // Build intrusive free-list chain once
+    free_head_ = 1;
+    for(uint32_t i = 1; i < MAX_CAPACITY - 1; ++i) {
+        order_pool_[i].next = i + 1;
     }
+    order_pool_[MAX_CAPACITY - 1].next = 0;
     
-    // Zero-out the lookup array to prevent garbage pointers
     std::fill_n(order_lookup_, MAX_CAPACITY, 0);
 
     const char* const SYMBOLS[] = {"AAPL", "AMZN", "GOOG", "MSFT", "TSLA"};
@@ -52,7 +48,6 @@ MatchingEngine::~MatchingEngine() {
     free(active_books_);
     free(order_lookup_);
     free(order_pool_);
-    free(free_stack_);
 }
 
 __attribute__((always_inline))
@@ -115,12 +110,14 @@ void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid,
     Trade &tb = book.tradebuf;
     tb.buy_order_id = incomingid;
 
-    // Pinning iteration variables strictly to registers to avoid struct re-reads
     int64_t p = book.bestask;
     
     while (remaining > 0 && p <= limitprice) {
         PriceLevelNode &__restrict__ level = asks[p];
         uint32_t curr = level.head;
+        const uint32_t first_freed = curr;
+        uint32_t last_freed = 0;
+        uint32_t filled_count = 0;
 
         while (curr != 0) {
             OrderNode &__restrict__ resting = pool[curr];
@@ -137,19 +134,31 @@ void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid,
             resting.quantity = new_r_qty;
             const uint32_t next = resting.next;
 
+            if (next) __builtin_prefetch(&pool[next], 1, 1);
+
             if (new_r_qty == 0) [[likely]] {
                 lookup[resting.id] = 0;
-                --liveorderscount;
-                level.head = next;
-                if(next) pool[next].prev = 0; else level.tail = 0;
+                ++filled_count;
+                last_freed = curr;
                 listener_->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
-                free_stack_[free_top_++] = curr;
             } else {
                 listener_->onOrderUpdate({resting.id, OrderStatus::Accepted, new_r_qty});
+                break;
             }
             
             curr = next;
             if (remaining == 0) [[unlikely]] break;
+        }
+
+        // BULK O(1) FREE LIST SPLICE
+        if (last_freed != 0) {
+            liveorderscount -= filled_count;
+            pool[last_freed].next = free_head_;
+            free_head_ = first_freed;
+            
+            level.head = curr;
+            if (curr) pool[curr].prev = 0; 
+            else level.tail = 0;
         }
 
         if (level.head == 0) [[likely]] {
@@ -177,6 +186,9 @@ void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid
     while (remaining > 0 && p >= limitprice) {
         PriceLevelNode &__restrict__ level = bids[p];
         uint32_t curr = level.head;
+        const uint32_t first_freed = curr;
+        uint32_t last_freed = 0;
+        uint32_t filled_count = 0;
 
         while (curr != 0) {
             OrderNode &__restrict__ resting = pool[curr];
@@ -193,19 +205,31 @@ void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid
             resting.quantity = new_r_qty;
             const uint32_t next = resting.next;
 
+            if (next) __builtin_prefetch(&pool[next], 1, 1);
+
             if (new_r_qty == 0) [[likely]] {
                 lookup[resting.id] = 0;
-                --liveorderscount;
-                level.head = next;
-                if(next) pool[next].prev = 0; else level.tail = 0;
+                ++filled_count;
+                last_freed = curr;
                 listener_->onOrderUpdate({resting.id, OrderStatus::Filled, 0});
-                free_stack_[free_top_++] = curr;
             } else {
                 listener_->onOrderUpdate({resting.id, OrderStatus::Accepted, new_r_qty});
+                break;
             }
             
             curr = next;
             if (remaining == 0) [[unlikely]] break;
+        }
+
+        // BULK O(1) FREE LIST SPLICE
+        if (last_freed != 0) {
+            liveorderscount -= filled_count;
+            pool[last_freed].next = free_head_;
+            free_head_ = first_freed;
+            
+            level.head = curr;
+            if (curr) pool[curr].prev = 0; 
+            else level.tail = 0;
         }
 
         if (level.head == 0) [[likely]] {
@@ -247,10 +271,13 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
 
     // TODO: Step 5: If quantity remains, insert into the book.
     if (remaining > 0) [[likely]] {
-        const uint32_t pool_idx = free_stack_[--free_top_];
         OrderNode* __restrict__ pool = order_pool_;
-        OrderNode &__restrict__ node = pool[pool_idx];
         
+        // Fast Intrusive Alloc
+        const uint32_t pool_idx = free_head_;
+        free_head_ = pool[pool_idx].next;
+
+        OrderNode &__restrict__ node = pool[pool_idx];
         node.id       = order_id;
         node.quantity = remaining;
         node.next     = 0;
@@ -306,7 +333,10 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
     --liveorderscount;
     
     listener_->onOrderUpdate({order_id, OrderStatus::Cancelled, 0});
-    free_stack_[free_top_++] = pool_idx;
+    
+    // Fast Intrusive Free
+    order_pool_[pool_idx].next = free_head_;
+    free_head_ = pool_idx;
     
     return true;
 }
@@ -335,7 +365,6 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
         }
 
         node.quantity = new_quantity;
-        // Inlined priority loss re-queue
         if (side == Side::Buy) {
             PriceLevelNode &__restrict__ level = book.bidlevels[old_price];
             const uint32_t p = node.prev;
@@ -369,7 +398,11 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     if (remaining == 0) {
         listener_->onOrderUpdate({order_id, OrderStatus::Filled, 0});
         order_lookup_[order_id] = 0;
-        free_stack_[free_top_++] = pool_idx;
+        
+        // Fast Intrusive Free
+        pool[pool_idx].next = free_head_;
+        free_head_ = pool_idx;
+        
         --liveorderscount;
         return true;
     }
@@ -378,7 +411,6 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     node.quantity = remaining;
     node.next = 0;
 
-    // Inlined placement
     if (side == Side::Buy) {
         PriceLevelNode &__restrict__ level = book.bidlevels[new_price];
         node.prev = level.tail;

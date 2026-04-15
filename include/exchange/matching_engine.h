@@ -123,7 +123,7 @@ private:
     static constexpr int64_t MAXPRICE = 52000;
     static constexpr int64_t NOBID = 0;
     static constexpr int64_t NOASK = MAXPRICE + 1;
-    static constexpr uint32_t MAX_CAPACITY = 12000000; // 12 Million Safe Limit
+    static constexpr uint32_t MAX_CAPACITY = 12000000; 
 
     struct PriceLevelNode { 
         uint32_t head = 0;
@@ -148,14 +148,13 @@ private:
         Trade tradebuf;
     };
 
-    // Naked raw pointers mapped to cache-aligned memory
     OrderBook* __restrict__ active_books_ = nullptr;
     uint64_t* __restrict__ order_lookup_ = nullptr;
     OrderNode* __restrict__ order_pool_   = nullptr;
-    uint32_t* __restrict__ free_stack_   = nullptr;
-    uint32_t free_top_ = 0;
+    
+    // Intrusive Free List Head
+    uint32_t free_head_ = 1;
 
-    // Bitwise Packing for Lookup
     inline uint64_t packLookup(uint32_t pool_idx, int64_t price, uint8_t bookidx, Side side) const noexcept {
         return (uint64_t)pool_idx | ((uint64_t)price << 32) | ((uint64_t)bookidx << 60) | ((uint64_t)(side == Side::Buy ? 1 : 0) << 63);
     }
@@ -168,7 +167,6 @@ private:
     inline void removeOrder(OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price, Side side) noexcept;
     void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
     void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-
 };
 
 }  // namespace exchange
