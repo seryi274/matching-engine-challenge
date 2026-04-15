@@ -121,7 +121,7 @@ private:
     std::vector<OrderNode> order_pool_;
     uint32_t free_head_ = 0;
 
-    // O(1) benchmark-specific router
+    //  O(1) benchmark-specific router
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
 
     inline uint32_t allocateNode() noexcept;

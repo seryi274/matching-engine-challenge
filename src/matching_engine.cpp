@@ -5,7 +5,7 @@ namespace exchange {
 MatchingEngine::MatchingEngine(Listener* listener)
     : listener_(listener)
 {
-    // TODO: Initialize your data structures here.
+    // TODO:  Initialize your data structures here.
 
     // pre sized lookup and pool based on benchmark
     order_lookup_.resize(8500000, 0);
