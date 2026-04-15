@@ -16,7 +16,8 @@ namespace exchange {
 MatchingEngine::MatchingEngine(Listener* listener)
     : listener_(listener)
 {   
-    active_books_ = new (aligned_alloc_64(5 * sizeof(OrderBook))) OrderBook[5];
+    // Allocated out to 8 to support the perfect hash mapping index
+    active_books_ = new (aligned_alloc_64(8 * sizeof(OrderBook))) OrderBook[8];
     order_lookup_ = static_cast<uint64_t*>(aligned_alloc_64(MAX_CAPACITY * sizeof(uint64_t)));
     order_pool_   = static_cast<OrderNode*>(aligned_alloc_64(MAX_CAPACITY * sizeof(OrderNode)));
     
@@ -28,22 +29,28 @@ MatchingEngine::MatchingEngine(Listener* listener)
     
     std::fill_n(order_lookup_, MAX_CAPACITY, 0);
 
-    const char* const SYMBOLS[] = {"AAPL", "AMZN", "GOOG", "MSFT", "TSLA"};
-    for (int i = 0; i < 5; ++i) {
-        active_books_[i].symbol = SYMBOLS[i];
-        active_books_[i].tradebuf.symbol = SYMBOLS[i];
+    for (int i = 0; i < 8; ++i) {
         active_books_[i].bestbid = NOBID;
         active_books_[i].bestask = NOASK;
-        
         std::fill_n(active_books_[i].bidlevels, MAXPRICE + 2, PriceLevelNode{0, 0});
         std::fill_n(active_books_[i].asklevels, MAXPRICE + 2, PriceLevelNode{0, 0});
         std::fill_n(active_books_[i].bid_bits, 815, 0);
         std::fill_n(active_books_[i].ask_bits, 815, 0);
         
-        // Permanent Sentinels guarantee boundary safety during bit-scans
         active_books_[i].bid_bits[0] |= 1ULL; 
         active_books_[i].ask_bits[NOASK >> 6] |= (1ULL << (NOASK & 63)); 
     }
+
+    // Explicit binding for the perfectly hashed indices
+    auto bind_symbol = [&](int idx, const std::string& sym) {
+        active_books_[idx].symbol = sym;
+        active_books_[idx].tradebuf.symbol = sym;
+    };
+    bind_symbol(0, "AAPL");
+    bind_symbol(2, "AMZN");
+    bind_symbol(4, "TSLA");
+    bind_symbol(6, "MSFT");
+    bind_symbol(7, "GOOG");
 }
 
 MatchingEngine::~MatchingEngine() {
@@ -54,17 +61,9 @@ MatchingEngine::~MatchingEngine() {
 
 __attribute__((always_inline))
 inline uint16_t MatchingEngine::getBookIndex(const std::string & symbol) const noexcept {
-    // 4-Byte Integer Switch for maximum branch throughput
-    uint32_t val;
-    __builtin_memcpy(&val, symbol.data(), 4);
-    switch (val) {
-        case 0x4C504141: return 0; // AAPL
-        case 0x4E5A4D41: return 1; // AMZN
-        case 0x474F4F47: return 2; // GOOG
-        case 0x5446534D: return 3; // MSFT
-        case 0x414C5354: return 4; // TSLA
-        default: return 0;
-    }
+    // Zero-Branch Perfect Hash (Looks at 3rd character)
+    // AAPL='P'(80)->0, AMZN='Z'(90)->2, TSLA='L'(76)->4, MSFT='F'(70)->6, GOOG='O'(79)->7
+    return static_cast<uint16_t>(symbol[2] & 7);
 }
 
 __attribute__((always_inline))
@@ -83,7 +82,8 @@ inline void MatchingEngine::removeOrder(OrderBook &__restrict__ book, uint32_t p
             if(price == book.bestbid) {
                 uint32_t w = price >> 6;
                 uint32_t b = price & 63;
-                uint64_t mask = (b == 0) ? 0 : (book.bid_bits[w] & ((1ULL << b) - 1));
+                // Branchless down-scan
+                uint64_t mask = book.bid_bits[w] & (0x7FFFFFFFFFFFFFFFULL >> (63 - b));
                 if (mask) { book.bestbid = (w << 6) + 63 - __builtin_clzll(mask); }
                 else {
                     do { --w; } while ((mask = book.bid_bits[w]) == 0);
@@ -101,7 +101,8 @@ inline void MatchingEngine::removeOrder(OrderBook &__restrict__ book, uint32_t p
             if (price == book.bestask) {
                 uint32_t w = price >> 6;
                 uint32_t b = price & 63;
-                uint64_t mask = (b == 63) ? 0 : (book.ask_bits[w] & (~0ULL << (b + 1)));
+                // Branchless up-scan
+                uint64_t mask = book.ask_bits[w] & (0xFFFFFFFFFFFFFFFEULL << b);
                 if (mask) { book.bestask = (w << 6) + __builtin_ctzll(mask); }
                 else {
                     do { ++w; } while ((mask = book.ask_bits[w]) == 0);
@@ -112,13 +113,13 @@ inline void MatchingEngine::removeOrder(OrderBook &__restrict__ book, uint32_t p
     }
 }
 
-__attribute__((hot))
+__attribute__((hot, flatten))
 void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
     PriceLevelNode* __restrict__ asks = book.asklevels;
     OrderNode* __restrict__ pool = order_pool_;
     uint64_t* __restrict__ lookup = order_lookup_;
-    Listener* __restrict__ local_listener = listener_; // Strict aliasing hint
-    Trade* __restrict__ tb = &book.tradebuf;           // Stack/Register pinning hint
+    Listener* __restrict__ local_listener = listener_; 
+    Trade* __restrict__ tb = &book.tradebuf;           
     
     tb->buy_order_id = incomingid;
     int64_t p = book.bestask;
@@ -130,13 +131,14 @@ void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid,
         uint32_t last_freed = 0;
         uint32_t filled_count = 0;
 
+        tb->price = p; // Hoisted invariant
+
         while (curr != 0) {
             OrderNode &__restrict__ resting = pool[curr];
             const uint32_t r_qty = resting.quantity;
             const uint32_t fillquantity = (remaining < r_qty ? remaining : r_qty);
 
             tb->sell_order_id = resting.id;
-            tb->price = p;
             tb->quantity = fillquantity;
             local_listener->onTrade(*tb);
 
@@ -173,7 +175,7 @@ void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid,
             book.ask_bits[p >> 6] &= ~(1ULL << (p & 63));
             uint32_t w = p >> 6;
             uint32_t b = p & 63;
-            uint64_t mask = (b == 63) ? 0 : (book.ask_bits[w] & (~0ULL << (b + 1)));
+            uint64_t mask = book.ask_bits[w] & (0xFFFFFFFFFFFFFFFEULL << b);
             if (mask) { p = (w << 6) + __builtin_ctzll(mask); }
             else {
                 do { ++w; } while ((mask = book.ask_bits[w]) == 0);
@@ -184,7 +186,7 @@ void MatchingEngine::matchBuy(OrderBook &__restrict__ book, uint64_t incomingid,
     book.bestask = p;
 }
 
-__attribute__((hot))
+__attribute__((hot, flatten))
 void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid, int64_t limitprice, uint32_t &remaining) noexcept {
     PriceLevelNode* __restrict__ bids = book.bidlevels;
     OrderNode* __restrict__ pool = order_pool_;
@@ -202,13 +204,14 @@ void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid
         uint32_t last_freed = 0;
         uint32_t filled_count = 0;
 
+        tb->price = p;
+
         while (curr != 0) {
             OrderNode &__restrict__ resting = pool[curr];
             const uint32_t r_qty = resting.quantity;
             const uint32_t fillquantity = (remaining < r_qty ? remaining : r_qty);
 
             tb->buy_order_id = resting.id;
-            tb->price = p;
             tb->quantity = fillquantity;
             local_listener->onTrade(*tb);
 
@@ -245,7 +248,7 @@ void MatchingEngine::matchSell(OrderBook &__restrict__ book, uint64_t incomingid
             book.bid_bits[p >> 6] &= ~(1ULL << (p & 63));
             uint32_t w = p >> 6;
             uint32_t b = p & 63;
-            uint64_t mask = (b == 0) ? 0 : (book.bid_bits[w] & ((1ULL << b) - 1));
+            uint64_t mask = book.bid_bits[w] & (0x7FFFFFFFFFFFFFFFULL >> (63 - b));
             if (mask) { p = (w << 6) + 63 - __builtin_clzll(mask); }
             else {
                 do { --w; } while ((mask = book.bid_bits[w]) == 0);
@@ -321,7 +324,6 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
 }
 
 bool MatchingEngine::cancelOrder(uint64_t order_id) {
-    // Bounds check completely eliminated
     const uint64_t lookup_val = order_lookup_[order_id];
     const uint32_t pool_idx = unpackPoolIdx(lookup_val);
     if(pool_idx == 0) [[unlikely]] return false;
@@ -344,7 +346,6 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
 bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) {
     if (new_price <= 0 || new_quantity == 0 || new_price > MAXPRICE) [[unlikely]] return false;
 
-    // Bounds check completely eliminated
     const uint64_t lookup_val = order_lookup_[order_id];
     const uint32_t pool_idx = unpackPoolIdx(lookup_val);
     if (pool_idx == 0) [[unlikely]] return false;
@@ -451,7 +452,7 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(const std::string& symbo
             
             uint32_t w = p >> 6;
             uint32_t b = p & 63;
-            uint64_t mask = (b == 0) ? 0 : (found->bid_bits[w] & ((1ULL << b) - 1));
+            uint64_t mask = found->bid_bits[w] & (0x7FFFFFFFFFFFFFFFULL >> (63 - b));
             if (mask) { p = (w << 6) + 63 - __builtin_clzll(mask); }
             else {
                 do { --w; } while ((mask = found->bid_bits[w]) == 0);
@@ -472,7 +473,7 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(const std::string& symbo
             
             uint32_t w = p >> 6;
             uint32_t b = p & 63;
-            uint64_t mask = (b == 63) ? 0 : (found->ask_bits[w] & (~0ULL << (b + 1)));
+            uint64_t mask = found->ask_bits[w] & (0xFFFFFFFFFFFFFFFEULL << b);
             if (mask) { p = (w << 6) + __builtin_ctzll(mask); }
             else {
                 do { ++w; } while ((mask = found->ask_bits[w]) == 0);
