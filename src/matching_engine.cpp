@@ -21,16 +21,18 @@ static constexpr int     NSYMS  = 5;
 static const char* SYM_NAME[NSYMS] = {"AAPL","GOOG","MSFT","AMZN","TSLA"};
 
 // Map symbol to 0-4 by first two chars (all unique: AA, GO, MS, AM, TS).
-// Tried s[2] switch -- same speed, not worth the refactor.
-int8_t sym_idx(const std::string& s) {
+// Tried s[2] switch and bit-packed string hashes -- same speed, not worth it.
+// The compiler already turns this into a tight jump table at -O2.
+static inline int8_t sym_idx(const std::string& s) {
     if (s.empty()) return -1;
-    switch (s[0]) {
-        case 'A': return s.size()>1 ? (s[1]=='A'?0 : s[1]=='M'?3 : -1) : -1;
-        case 'G': return 1;
-        case 'M': return 2;
-        case 'T': return 4;
-        default:  return -1;
-    }
+    const char c0 = s[0];
+    if (c0 == 'G') return 1;
+    if (c0 == 'M') return 2;
+    if (c0 == 'T') return 4;
+    // Only the 'A' case needs disambiguation between AAPL (0) and AMZN (3).
+    if (c0 == 'A' && s.size() > 1)
+        return s[1] == 'A' ? 0 : (s[1] == 'M' ? 3 : -1);
+    return -1;
 }
 
 // ── Data structures ────────────────────────────────────────────────────────────
