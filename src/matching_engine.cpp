@@ -145,6 +145,15 @@ void remove_order(uint32_t s, Book& bk, State& st) {
 //
 // Tried templating on side, splitting into two funcs, and __builtin_prefetch
 // on next -- none gave measurable improvement on the hot path.
+//
+// ABANDONED: tried batching 4 fills via AVX2 for the inner loop. The control
+// flow on partial-fill vs full-fill makes vectorisation basically impossible
+// without a full SoA rewrite. Leaving the scalar version; chasing SoA is a
+// dead end given the virtual-call bottleneck on onTrade/onOrderUpdate.
+//
+// Also experimented with __attribute__((hot, flatten)) on the public entry
+// points -- no change in generated assembly at -O2. GCC already inlines
+// everything reachable from the hot path aggressively enough.
 
 uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
                   Book& bk, State& st, Listener* L)
