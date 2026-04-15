@@ -220,7 +220,6 @@ namespace exchange {
         if (lookup_it == this->order_lookup_.end()) return false;
 
         auto& info_it = lookup_it->second;
-        auto order_it = info_it.order_it;
 
         bool price_changed = std::abs(info_it.price) != new_price;
 
