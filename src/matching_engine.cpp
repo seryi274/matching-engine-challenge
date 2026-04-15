@@ -92,7 +92,7 @@ void lv_erase(Level& lv, State& st, uint32_t s) {
     lv.cnt--;  lv.total_qty -= o.qty;
 }
 
-// Resting order management
+// Resting order management.
 
 void insert_order(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
                   Book& bk, State& st)
