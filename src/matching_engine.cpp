@@ -5,8 +5,6 @@
 #include <memory>
 #include <vector>
 
-// Imp
-
 namespace exchange {
 
 // constants
@@ -15,7 +13,6 @@ static constexpr int     N_SYMBOLS = 5;
 static const char* const SYMBOL_NAMES[N_SYMBOLS] = {
     "AAPL", "GOOG", "MSFT", "AMZN", "TSLA"
 };
-
 
 // s[2] is unique across the five tickers (P,O,F,Z,L) so one switch
 // compiles to a jump table with no nested compares.
@@ -34,16 +31,35 @@ int symbolToIndex(const std::string& s) noexcept {
 // Core data types
 // ==========================================================================
 
+// 20-byte Order: 3 orders fit in a 64-byte cache line (60 bytes used, 4 pad).
+//
+// We shrink by packing price+sym+side into a single uint32_t:
+//   bits  0..15  price (max 50200 fits in 16 bits)
+//   bits 16..23  symIdx (0..4)
+//   bits 24..24  side (0=Buy, 1=Sell)
+//   bits 25..31  unused
+//
+// id: uint32_t is enough (max id is ~10.5M << 2^32).
+// qty: uint32_t kept to match the public API without truncation.
 struct Order {
-    uint64_t id;
-    uint32_t next;        // pool-index of next order at same price (0 = end)
-    uint32_t prev;        // pool-index of prev order at same price (0 = begin)
+    uint32_t id;
+    uint32_t next;          // pool slot of next order at same price (0 = end)
+    uint32_t prev;          // pool slot of prev order (0 = head)
     uint32_t qty;
-    int64_t  price;
-    uint8_t  symIdx;
-    uint8_t  side;        // 0 = Buy, 1 = Sell
-    uint16_t pad;         // keeps struct at 32 bytes (two orders per cache line)
+    uint32_t priceSymSide;  // packed, see encoding above
 };
+static_assert(sizeof(Order) == 20, "Order must be exactly 20 bytes");
+
+static __attribute__((always_inline)) inline
+uint32_t packPSS(int64_t price, uint8_t sym, uint8_t side) noexcept {
+    return (uint32_t)price | ((uint32_t)sym << 16) | ((uint32_t)side << 24);
+}
+static __attribute__((always_inline)) inline
+int64_t  unpackPrice(uint32_t pss) noexcept { return (int64_t)(pss & 0xFFFF); }
+static __attribute__((always_inline)) inline
+uint8_t  unpackSym(uint32_t pss)   noexcept { return (uint8_t)((pss >> 16) & 0xFF); }
+static __attribute__((always_inline)) inline
+uint8_t  unpackSide(uint32_t pss)  noexcept { return (uint8_t)((pss >> 24) & 0x1); }
 
 // queue of resting orders at one tick
 struct PriceBucket {
@@ -53,30 +69,27 @@ struct PriceBucket {
     uint32_t totalQty = 0;
 };
 
-/* One book per symbol. 1.6 MB each -- flat arrays beat any tree here.
- * Trade buffer is embedded so the symbol string lives in the book,
- * pre-filled once at construction (Kappa-style reuse). */
+/* One book per symbol. Flat arrays for levels. */
 struct Book {
     PriceBucket bids[MAX_TICK + 1];
     PriceBucket asks[MAX_TICK + 1];
     int64_t  bestBid = 0;
     int64_t  bestAsk = 0;
-    uint32_t liveBidLevels = 0;  // occupied bid tick-buckets
-    uint32_t liveAskLevels = 0;  // occupied ask tick-buckets
-    Trade    tradeBuf;           // symbol prefilled in MatchingEngine ctor
+    uint32_t liveBidLevels = 0;
+    uint32_t liveAskLevels = 0;
+    Trade    tradeBuf;           // symbol prefilled in ctor, reused across fills
 };
 
-// per-instance engine state, held through MatchingEngine::state_.
 struct EngineState {
     Book books[N_SYMBOLS];
-    std::vector<Order>    orderPool;      // pool[0] reserved as null slot
-    std::vector<uint32_t> idToSlot;       // order id -> pool index (0 = absent)
-    uint32_t              freeHead = 0;   // head of singly-linked free list
+    std::vector<Order>    orderPool;     // pool[0] reserved as null slot
+    std::vector<uint32_t> idToSlot;      // order_id -> slot (0 = absent)
+    uint32_t              freeHead = 0;
     uint64_t              liveCount = 0;
 };
 
 // --------------------------------------------------------------------------
-// pool: O(1) alloc/free via free list, recycled to keep the working set warm.
+// pool: O(1) alloc/free via free list, recycled to keep the working set warm
 // --------------------------------------------------------------------------
 
 static __attribute__((always_inline)) inline
@@ -130,12 +143,10 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
                Book& book, EngineState& s) noexcept
 {
     uint32_t slot = poolAcquire(s);
-    Order& o  = s.orderPool[slot];
-    o.id      = oid;
-    o.qty     = qty;
-    o.price   = price;
-    o.symIdx  = symIdx;
-    o.side    = (uint8_t)side;
+    Order& o = s.orderPool[slot];
+    o.id           = (uint32_t)oid;
+    o.qty          = qty;
+    o.priceSymSide = packPSS(price, symIdx, (uint8_t)side);
 
     PriceBucket& bucket = (side == Side::Buy) ? book.bids[price] : book.asks[price];
     const bool freshLevel = (bucket.head == 0);
@@ -153,16 +164,18 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
     ++s.liveCount;
 }
 
-// Takes an order off the book and frees its slot. Also scans for the next
-// best price if we just emptied the best level (O(spread), O(1) typical).
 static __attribute__((always_inline)) inline
 void unrestOrder(uint32_t slot, Book& book, EngineState& s) noexcept {
-    Order& o = s.orderPool[slot];
-    PriceBucket& bucket = (o.side == 0) ? book.bids[o.price] : book.asks[o.price];
+    Order&   o     = s.orderPool[slot];
+    const uint32_t pss = o.priceSymSide;
+    const int64_t  price = unpackPrice(pss);
+    const uint8_t  side  = unpackSide(pss);
+
+    PriceBucket& bucket = (side == 0) ? book.bids[price] : book.asks[price];
     bucketUnlink(bucket, s, slot);
 
     if (!bucket.head) {
-        if (o.side == 0) {
+        if (side == 0) {
             --book.liveBidLevels;
             if (!book.liveBidLevels) {
                 book.bestBid = 0;
@@ -191,25 +204,24 @@ void unrestOrder(uint32_t slot, Book& book, EngineState& s) noexcept {
 // MATCHING LOOP -- the hot path.
 // ==========================================================================
 //
-// Templated on Side so the compiler generates two specialised versions,
-// one for aggressive buys and one for aggressive sells. We reuse a stack
-// local Trade / OrderUpdate buffer instead of constructing temporaries
-// per fill -- keeps the struct layout in registers across iterations.
+// Inside the inner sweep we only touch id, next, qty (16 of 20 bytes).
+// With 20-byte orders, 3 fit per cache line -- the prefetcher and the
+// sequential free-list recycling keep this dense.
 
 template <Side SIDE>
 static __attribute__((always_inline)) inline
 uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty,
                  Book& book, EngineState& s, Listener* listener) noexcept
 {
-    Trade&      trade = book.tradeBuf;  // symbol prefilled in ctor, reused across fills
+    Trade&      trade = book.tradeBuf;
     OrderUpdate upd;
 
     if constexpr (SIDE == Side::Buy) {
         trade.buy_order_id = aggId;
 
         while (qty > 0 && book.bestAsk > 0 && book.bestAsk <= limit) {
-            int64_t      execPrice = book.bestAsk;
-            PriceBucket& bucket    = book.asks[execPrice];
+            const int64_t execPrice = book.bestAsk;
+            PriceBucket&  bucket    = book.asks[execPrice];
             trade.price = execPrice;
 
             while (qty > 0 && bucket.head) {
@@ -223,8 +235,8 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
                 trade.quantity      = fillQty;
                 listener->onTrade(trade);
 
-                qty           -= fillQty;
-                rest.qty      -= fillQty;
+                qty             -= fillQty;
+                rest.qty        -= fillQty;
                 bucket.totalQty -= fillQty;
 
                 upd.order_id = rest.id;
@@ -260,12 +272,12 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
             }
         }
     } else {
-        // caso vendedor: barremos bids de mayor a menor mientras crucen
+        // caso vendedor
         trade.sell_order_id = aggId;
 
         while (qty > 0 && book.bestBid > 0 && book.bestBid >= limit) {
-            int64_t      execPrice = book.bestBid;
-            PriceBucket& bucket    = book.bids[execPrice];
+            const int64_t execPrice = book.bestBid;
+            PriceBucket&  bucket    = book.bids[execPrice];
             trade.price = execPrice;
 
             while (qty > 0 && bucket.head) {
@@ -279,8 +291,8 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
                 trade.quantity     = fillQty;
                 listener->onTrade(trade);
 
-                qty           -= fillQty;
-                rest.qty      -= fillQty;
+                qty             -= fillQty;
+                rest.qty        -= fillQty;
                 bucket.totalQty -= fillQty;
 
                 upd.order_id = rest.id;
@@ -323,19 +335,17 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
 // ==========================================================================
 
 MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
-    // TODO: initialize internal state
     auto* s = new EngineState();
 
-    // resize + clear: forces physical page allocation up front so
-    // the hot path never hits a first-touch fault.
+    // Pre-touch pool pages so the hot path never hits a first-touch fault.
     s->orderPool.resize(1 << 22);          // 4M slots (adversarial safe)
     s->orderPool.clear();
-    s->orderPool.emplace_back();           // pool[0] is the null sentinel
+    s->orderPool.emplace_back();           // slot 0 sentinel
 
-    // pre-touched in one call. 10.5M = 500k warmup + 10M measurement ops
+    // 10.5M = 500k warmup + 10M measurement ops per scenario
     s->idToSlot.assign(10500001, 0);
 
-    // prefill the trade buffer symbol per book, so matching never touches the string
+    // prefill trade buffer symbol per book (kappa-style reuse)
     for (int i = 0; i < N_SYMBOLS; ++i) {
         s->books[i].tradeBuf.symbol = SYMBOL_NAMES[i];
     }
@@ -350,7 +360,6 @@ MatchingEngine::~MatchingEngine() {
 // ----  addOrder  ----
 __attribute__((hot, flatten))
 OrderAck MatchingEngine::addOrder(const OrderRequest& request) noexcept {
-    // reject obviously bad requests
     if (request.price <= 0 || request.quantity == 0 || request.symbol.empty()) [[unlikely]]
         return {0, OrderStatus::Rejected};
 
@@ -360,8 +369,7 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) noexcept {
     EngineState& s    = *state_;
     Book&        book = s.books[si];
 
-    // Fast path: if nothing can cross on the opposite side, skip the match
-    // loop entirely. This is the overwhelmingly common case in the feed.
+    // Fast path: skip the match loop entirely when nothing can cross.
     uint32_t remaining;
     const bool isBuy = (request.side == Side::Buy);
     const int64_t opp = isBuy ? book.bestAsk : book.bestBid;
@@ -397,7 +405,8 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) noexcept {
         return false;
 
     uint32_t slot = s.idToSlot[order_id];
-    unrestOrder(slot, s.books[s.orderPool[slot].symIdx], s);
+    Order&   o    = s.orderPool[slot];
+    unrestOrder(slot, s.books[unpackSym(o.priceSymSide)], s);
     listener_->onOrderUpdate({order_id, OrderStatus::Cancelled, 0});
     return true;
 }
@@ -414,33 +423,37 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     uint32_t slot = s.idToSlot[order_id];
     Order&   o    = s.orderPool[slot];
 
+    const uint32_t pss  = o.priceSymSide;
+    const int64_t oldPrice = unpackPrice(pss);
+    const uint8_t symIdx   = unpackSym(pss);
+    const uint8_t sideRaw  = unpackSide(pss);
+
     // caso feliz: misma tick, qty decrece => mantenemos prioridad
-    if (new_price == o.price && new_quantity <= o.qty) {
-        PriceBucket& b = (o.side == 0)
-            ? s.books[o.symIdx].bids[o.price]
-            : s.books[o.symIdx].asks[o.price];
+    if (new_price == oldPrice && new_quantity <= o.qty) {
+        PriceBucket& b = (sideRaw == 0)
+            ? s.books[symIdx].bids[oldPrice]
+            : s.books[symIdx].asks[oldPrice];
         b.totalQty -= (o.qty - new_quantity);
         o.qty = new_quantity;
         return true;
     }
 
-    // perdemos prioridad: quitar, re-match al nuevo precio, re-insertar al final
-    uint8_t si    = o.symIdx;
-    Side    side  = (Side)o.side;
-    Book&   book  = s.books[si];
+    // perdemos prioridad
+    Side  side = (Side)sideRaw;
+    Book& book = s.books[symIdx];
 
     unrestOrder(slot, book, s);
 
     uint32_t remaining;
     if (side == Side::Buy)
-        remaining = doMatch<Side::Buy >(order_id, si, new_price, new_quantity,
+        remaining = doMatch<Side::Buy >(order_id, symIdx, new_price, new_quantity,
                                         book, s, listener_);
     else
-        remaining = doMatch<Side::Sell>(order_id, si, new_price, new_quantity,
+        remaining = doMatch<Side::Sell>(order_id, symIdx, new_price, new_quantity,
                                         book, s, listener_);
 
     if (remaining > 0) {
-        restOrder(order_id, si, side, new_price, remaining, book, s);
+        restOrder(order_id, symIdx, side, new_price, remaining, book, s);
         listener_->onOrderUpdate({order_id, OrderStatus::Accepted, remaining});
     } else {
         listener_->onOrderUpdate({order_id, OrderStatus::Filled, 0});
