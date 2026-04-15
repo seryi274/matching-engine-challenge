@@ -220,6 +220,7 @@ namespace exchange {
             }
 
             int64_t active_price;
+            // CONSTEXPR ALL THE THINGS!!!
             if constexpr (side == Side::Buy) active_price = -request.price;
             else active_price = request.price;
 
@@ -243,6 +244,7 @@ namespace exchange {
 
                     // Execution price is always the RESTING (passive) order's price
                     const int64_t trade_price = std::abs(current_price);
+                    // CONSTEXPR ALL THE THINGS!!!
                     if constexpr (side == Side::Buy) {
                         this->listener_->onTrade(Trade{
                             active_order_id, resting_order_id, request.symbol, trade_price, trade_quantity
