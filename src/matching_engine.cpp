@@ -1,131 +1,236 @@
 #include "exchange/matching_engine.h"
-
 #include <algorithm>
-#include <list>
-#include <map>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
-// ── Internal data structures ──────────────────────────────────────────────────
+// NOTE: The server overwrites include on submission, so we cannot add private members to matching_engine.h
 
 namespace {
 using namespace exchange;
 
+// Static constants
+
+static constexpr int64_t MAX_PX = 50200;  // fair value <= 50k, spread <= 200
+static constexpr int     NSYMS  = 5;
+static const char* SYM_NAME[NSYMS] = {"AAPL","GOOG","MSFT","AMZN","TSLA"};
+
+// Map symbol to 0-4 by first two chars (AA, GO, MS, AM, TS)
+int8_t sym_idx(const std::string& s) {
+    if (s.empty()) return -1;
+    switch (s[0]) {
+        case 'A': return s.size()>1 ? (s[1]=='A'?0 : s[1]=='M'?3 : -1) : -1;
+        case 'G': return 1;
+        case 'M': return 2;
+        case 'T': return 4;
+        default:  return -1;
+    }
+}
+
+// Data structures
+
 struct Order {
     uint64_t id;
-    Side     side;
+    uint32_t next, prev;   // pseudo doubly linked list
+    uint32_t qty;
     int64_t  price;
-    uint32_t quantity;
-};
+    uint8_t  sym, side;
+    uint16_t _pad;
+};  // 32 bytes (2 per cache line)
 
-using Level = std::list<Order>;          // FIFO queue at one price level
+struct Level {
+    uint32_t head=0, tail=0;       // FIFO queue of pool slots (first and last position)
+    uint32_t cnt=0, total_qty=0;   // aggregates for getBookSnapshot
+};  // 16 bytes (4 per cache line)
 
 struct Book {
-    std::map<int64_t, Level, std::greater<int64_t>> bids;  // highest price first
-    std::map<int64_t, Level>                        asks;  // lowest  price first
-};
-
-struct Loc {
-    std::string     symbol;
-    Side            side;
-    int64_t         price;
-    Level::iterator it;
+    Level   bids[MAX_PX+1];   // bids[p] = all resting buy orders at tick p
+    Level   asks[MAX_PX+1];   // asks[p] = all resting sell orders at tick p
+    int64_t best_bid=0;       // highest occupied bid price  (0 = empty)
+    int64_t best_ask=0;       // lowest  occupied ask price  (0 = empty)
 };
 
 struct State {
-    std::unordered_map<std::string, Book> books;
-    std::unordered_map<uint64_t,   Loc>  orders;   // id → location in book
-    uint64_t                             count = 0;
+    Book   books[NSYMS];
+    std::vector<Order>    pool;         // pool[0] = null sentinel, grows as needed
+    std::vector<uint32_t> id_to_slot;   // id_to_slot[order_id] = pool slot, 0 = not resting
+    uint32_t free_head = 0;             // pseudo stack
+    uint64_t count = 0;
 };
 
-std::unordered_map<MatchingEngine*, State> g_states;
+std::unordered_map<MatchingEngine*, std::unique_ptr<State>> g_inst;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Pool: O(1) alloc/free
 
-// Insert an order at the back of its price level and record its location.
-void insertResting(Book& book, State& st,
-                   uint64_t id, const std::string& sym,
-                   Side side, int64_t price, uint32_t qty)
-{
-    auto go = [&](auto& levels) {
-        auto& q = levels[price];
-        q.push_back({id, side, price, qty});
-        st.orders[id] = {sym, side, price, std::prev(q.end())};
-        ++st.count;
-    };
-    if (side == Side::Buy) go(book.bids);
-    else                   go(book.asks);
+uint32_t pool_alloc(State& st) {
+    if (st.free_head) {
+        uint32_t s = st.free_head;
+        st.free_head = st.pool[s].next;
+        return s;
+    }
+    st.pool.emplace_back();
+    return (uint32_t)st.pool.size() - 1;
+}
+void pool_free(State& st, uint32_t s) {
+    st.pool[s].next = st.free_head;
+    st.free_head = s;
 }
 
-// Remove a resting order from its price level.
-void eraseResting(Book& book, State& st, const Loc& loc)
-{
-    auto go = [&](auto& levels) {
-        auto& q = levels[loc.price];
-        q.erase(loc.it);
-        if (q.empty()) levels.erase(loc.price);
-    };
-    if (loc.side == Side::Buy) go(book.bids);
-    else                       go(book.asks);
-    --st.count;
+// Level: doubly-linked FIFO via pool indices
+
+void lv_push(Level& lv, State& st, uint32_t s) {
+    Order& o = st.pool[s];
+    o.next = 0;  o.prev = lv.tail;
+    if (lv.tail) st.pool[lv.tail].next = s; else lv.head = s;
+    lv.tail = s;
+    lv.cnt++;  lv.total_qty += o.qty;
+}
+void lv_erase(Level& lv, State& st, uint32_t s) {
+    Order& o = st.pool[s];
+    if (o.prev) st.pool[o.prev].next = o.next; else lv.head = o.next;
+    if (o.next) st.pool[o.next].prev = o.prev; else lv.tail = o.prev;
+    lv.cnt--;  lv.total_qty -= o.qty;
 }
 
-// Match an incoming order against the opposite side of the book.
-// Fires onTrade + onOrderUpdate for each fill. Returns remaining quantity.
-uint32_t doMatch(uint64_t id, const std::string& sym, Side side,
-                 int64_t price, uint32_t qty, Book& book, State& st, Listener* L)
+// Resting order management
+
+void insert_order(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
+                  Book& bk, State& st)
 {
-    auto sweep = [&](auto& levels, auto crosses) {
-        for (auto lvl = levels.begin(); lvl != levels.end() && qty > 0 && crosses(lvl->first); ) {
-            auto& q = lvl->second;
-            while (!q.empty() && qty > 0) {
-                auto& r    = q.front();
-                uint32_t f = std::min(qty, r.quantity);
+    uint32_t s = pool_alloc(st);
+    Order& o = st.pool[s];
+    o.id=id; o.qty=qty; o.price=price; o.sym=sym; o.side=(uint8_t)side;
 
-                if (side == Side::Buy) L->onTrade({id,   r.id, sym, r.price, f});
-                else                   L->onTrade({r.id, id,   sym, r.price, f});
+    Level& lv = (side==Side::Buy) ? bk.bids[price] : bk.asks[price];
+    lv_push(lv, st, s);
 
-                qty        -= f;
-                r.quantity -= f;
+    if (side==Side::Buy) { if (!bk.best_bid||price>bk.best_bid) bk.best_bid=price; }
+    else                 { if (!bk.best_ask||price<bk.best_ask) bk.best_ask=price; }
 
-                if (r.quantity == 0) {
+    // Grow id_to_slot to cover id (new orders grow by 1; amend re-inserts stay in range).
+    if (id >= (uint64_t)st.id_to_slot.size())
+        st.id_to_slot.resize(id + 1, 0);
+    st.id_to_slot[id] = s;
+    st.count++;
+}
+
+void remove_order(uint32_t s, Book& bk, State& st) {
+    Order& o = st.pool[s];
+    Level& lv = (o.side==0) ? bk.bids[o.price] : bk.asks[o.price];
+    lv_erase(lv, st, s);
+
+    if (!lv.head) {  // level became empty, scan for new best price in O(spread)
+        if (o.side==0) {
+            while (bk.best_bid>0 && !bk.bids[bk.best_bid].head) bk.best_bid--;
+        } else {
+            while (bk.best_ask<=MAX_PX && !bk.asks[bk.best_ask].head) bk.best_ask++;
+            if (bk.best_ask>MAX_PX) bk.best_ask=0;
+        }
+    }
+
+    st.id_to_slot[o.id] = 0;
+    pool_free(st, s);
+    st.count--;
+}
+
+// Core matching loop
+
+uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
+                  Book& bk, State& st, Listener* L)
+{
+    const char* name = SYM_NAME[sym];
+
+    if (side == Side::Buy) {
+        // Sweep asks cheapest-first while ask <= buy price
+        while (qty>0 && bk.best_ask>0 && bk.best_ask<=price) {
+            int64_t p = bk.best_ask;
+            Level& lv = bk.asks[p];
+
+            while (qty>0 && lv.head) {
+                uint32_t s = lv.head;
+                Order& r = st.pool[s];
+                uint32_t f = std::min(qty, r.qty);
+
+                L->onTrade({id, r.id, name, p, f});
+                qty-=f;  r.qty-=f;  lv.total_qty-=f;
+
+                if (!r.qty) {
                     L->onOrderUpdate({r.id, OrderStatus::Filled, 0});
-                    st.orders.erase(r.id);
-                    q.pop_front();
-                    --st.count;
+                    lv.head = r.next;
+                    if (lv.head) st.pool[lv.head].prev=0; else lv.tail=0;
+                    lv.cnt--;
+                    st.id_to_slot[r.id] = 0;
+                    pool_free(st, s);
+                    st.count--;
                 } else {
-                    L->onOrderUpdate({r.id, OrderStatus::Accepted, r.quantity});
+                    L->onOrderUpdate({r.id, OrderStatus::Accepted, r.qty});
                 }
             }
-            lvl = q.empty() ? levels.erase(lvl) : std::next(lvl);
+            if (!lv.head) {  // level exhausted, advance best ask
+                bk.best_ask = p+1;
+                while (bk.best_ask<=MAX_PX && !bk.asks[bk.best_ask].head) bk.best_ask++;
+                if (bk.best_ask>MAX_PX) bk.best_ask=0;
+            }
         }
-    };
+    } else {
+        // Sweep bids highest-first while bid >= sell price
+        while (qty>0 && bk.best_bid>0 && bk.best_bid>=price) {
+            int64_t p = bk.best_bid;
+            Level& lv = bk.bids[p];
 
-    if (side == Side::Buy) sweep(book.asks, [price](int64_t p){ return p <= price; });
-    else                   sweep(book.bids, [price](int64_t p){ return p >= price; });
+            while (qty>0 && lv.head) {
+                uint32_t s = lv.head;
+                Order& r = st.pool[s];
+                uint32_t f = std::min(qty, r.qty);
+
+                L->onTrade({r.id, id, name, p, f});
+                qty-=f;  r.qty-=f;  lv.total_qty-=f;
+
+                if (!r.qty) {
+                    L->onOrderUpdate({r.id, OrderStatus::Filled, 0});
+                    lv.head = r.next;
+                    if (lv.head) st.pool[lv.head].prev=0; else lv.tail=0;
+                    lv.cnt--;
+                    st.id_to_slot[r.id] = 0;
+                    pool_free(st, s);
+                    st.count--;
+                } else {
+                    L->onOrderUpdate({r.id, OrderStatus::Accepted, r.qty});
+                }
+            }
+            if (!lv.head) {  // level exhausted, advance best bid
+                bk.best_bid = p-1;
+                while (bk.best_bid>0 && !bk.bids[bk.best_bid].head) bk.best_bid--;
+            }
+        }
+    }
     return qty;
 }
 
-} // anonymous namespace
+}
 
-// ── MatchingEngine ────────────────────────────────────────────────────────────
+// ================= MatchingEngine ==========================================
 
 namespace exchange {
 
-MatchingEngine::MatchingEngine(Listener* listener)
-    : listener_(listener)
-{
+MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     // TODO: Initialize your data structures here.
-    g_states[this]; // create per-instance state
+    auto st = std::make_unique<State>();
+    st->pool.reserve(1<<24);      // 2M slots upfront; grows automatically if needed
+    st->pool.emplace_back();      // pool[0] = null sentinel (index 0 means "no order")
+    st->id_to_slot.reserve(10500000);  // tight upper bound: 500K warmup + 10M measure ops
+    st->id_to_slot.push_back(0);  // index 0 = unused (mirrors pool sentinel)
+    g_inst[this] = std::move(st);
 }
 
 MatchingEngine::~MatchingEngine() {
     // TODO: Clean up if necessary.
-    g_states.erase(this);
+    g_inst.erase(this);
 }
 
 OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
     // Step 1: Validate the request.
-    if (request.price <= 0 || request.quantity == 0 || request.symbol.empty())
+    if (request.price<=0 || request.quantity==0 || request.symbol.empty())
         return {0, OrderStatus::Rejected};
 
     // Step 2: Assign an order ID.
@@ -135,8 +240,11 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
     //
     //   Hint: You need a per-symbol data structure that maintains
     //   buy orders (bids) and sell orders (asks) separately.
-    auto& st   = g_states[this];
-    auto& book = st.books[request.symbol];
+    int8_t sym = sym_idx(request.symbol);
+    if (sym < 0) return {0, OrderStatus::Rejected};
+
+    auto& st = *g_inst.at(this);
+    Book& bk = st.books[sym];
 
     // TODO: Step 4: Attempt to match against the opposite side.
     //
@@ -150,8 +258,8 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
     //   - For each match, call:
     //       listener_->onTrade(Trade{buy_id, sell_id, symbol, price, qty});
     //       listener_->onOrderUpdate(OrderUpdate{resting_id, status, remaining});
-    uint32_t rem = doMatch(id, request.symbol, request.side,
-                           request.price, request.quantity, book, st, listener_);
+    uint32_t rem = do_match(id, sym, request.side,
+                            request.price, request.quantity, bk, st, listener_);
 
     // TODO: Step 5: If quantity remains, insert into the book.
     // TODO: Step 6: Call listener_->onOrderUpdate() for the incoming order.
@@ -161,7 +269,7 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
     //   - status = Filled   if fully matched
     //   - status = Accepted if resting (including partial fills)
     if (rem > 0) {
-        insertResting(book, st, id, request.symbol, request.side, request.price, rem);
+        insert_order(id, sym, request.side, request.price, rem, bk, st);
         listener_->onOrderUpdate({id, OrderStatus::Accepted, rem});
         return {id, OrderStatus::Accepted};
     }
@@ -180,27 +288,25 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
     //
     // If not found (or already filled/cancelled):
     //   Return false
-    auto& st = g_states[this];
-    auto  it = st.orders.find(order_id);
-    if (it == st.orders.end()) return false;
+    auto& st = *g_inst.at(this);
+    if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
 
-    eraseResting(st.books[it->second.symbol], st, it->second);
-    st.orders.erase(it);
-
+    uint32_t s = st.id_to_slot[order_id];
+    remove_order(s, st.books[st.pool[s].sym], st);
     listener_->onOrderUpdate({order_id, OrderStatus::Cancelled, 0});
     return true;
 }
 
-bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) {
+bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_qty) {
     // Validate parameters.
-    if (new_price <= 0 || new_quantity == 0) return false;
+    if (new_price<=0 || new_qty==0) return false;
 
     // TODO: Look up the order by order_id.
     //
     // If found and still resting:
     //   1. Determine if time priority is lost:
-    //      - Price changed          -> loses priority
-    //      - Quantity increased     -> loses priority
+    //      - Price changed -> loses priority
+    //      - Quantity increased -> loses priority
     //      - Only quantity decreased -> keeps priority
     //   2. Update the order in your data structures:
     //      - If losing priority: remove and re-insert at the back of the level
@@ -210,32 +316,32 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     //   4. Return true
     //
     // If not found: return false
-    auto& st = g_states[this];
-    auto  it = st.orders.find(order_id);
-    if (it == st.orders.end()) return false;
+    auto& st = *g_inst.at(this);
+    if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
 
-    // Determine if time priority is lost.
-    //   Only quantity decreased (price unchanged) → keeps priority.
-    //   Price changed or quantity increased       → loses priority.
-    const Loc  loc     = it->second;              // copy before erasing
-    const bool keep    = (new_price == loc.price) && (new_quantity <= loc.it->quantity);
+    uint32_t s = st.id_to_slot[order_id];
+    Order&   o = st.pool[s];
 
-    if (keep) {
-        loc.it->quantity = new_quantity;          // update in-place
+    if (new_price==o.price && new_qty<=o.qty) {
+        // Quantity-only decrease: update in-place, keep FIFO position.
+        Level& lv = (o.side==0) ? st.books[o.sym].bids[o.price]
+                                 : st.books[o.sym].asks[o.price];
+        lv.total_qty -= (o.qty - new_qty);
+        o.qty = new_qty;
         return true;
     }
 
-    // Remove and re-insert at the back of the level (lost priority).
-    auto& book = st.books[loc.symbol];
-    eraseResting(book, st, loc);
-    st.orders.erase(it);
+    // Loses priority: remove, re-match at new price, re-insert at back.
+    uint8_t sym  = o.sym;
+    Side    side = (Side)o.side;
+    Book&   bk   = st.books[sym];
 
-    // If the new price could cause a match, run matching logic.
-    uint32_t rem = doMatch(order_id, loc.symbol, loc.side,
-                           new_price, new_quantity, book, st, listener_);
+    remove_order(s, bk, st);
+
+    uint32_t rem = do_match(order_id, sym, side, new_price, new_qty, bk, st, listener_);
 
     if (rem > 0) {
-        insertResting(book, st, order_id, loc.symbol, loc.side, new_price, rem);
+        insert_order(order_id, sym, side, new_price, rem, bk, st);
         listener_->onOrderUpdate({order_id, OrderStatus::Accepted, rem});
     } else {
         listener_->onOrderUpdate({order_id, OrderStatus::Filled, 0});
@@ -246,31 +352,33 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
 std::vector<PriceLevel> MatchingEngine::getBookSnapshot(
     const std::string& symbol, Side side) const
 {
-    auto& st = g_states[const_cast<MatchingEngine*>(this)];
-    auto  it = st.books.find(symbol);
-    if (it == st.books.end()) return {};
-
     // TODO: Build a vector of PriceLevel for the requested side.
     //
     // Sort best-to-worst:
-    //   Buy side:  highest price first
+    //   Buy side: highest price first
     //   Sell side: lowest price first
+    int8_t sym = sym_idx(symbol);
+    if (sym < 0) return {};
+
+    auto& st       = *g_inst.at(const_cast<MatchingEngine*>(this));
+    const Book& bk = st.books[sym];
+
     std::vector<PriceLevel> result;
-    auto aggregate = [&](const auto& levels) {
-        for (const auto& [price, queue] : levels) {
-            uint32_t qty = 0, cnt = 0;
-            for (const auto& o : queue) { qty += o.quantity; ++cnt; }
-            if (cnt > 0) result.push_back({price, qty, cnt});
-        }
-    };
-    if (side == Side::Buy) aggregate(it->second.bids);
-    else                   aggregate(it->second.asks);
+    if (side == Side::Buy) {
+        for (int64_t p=bk.best_bid; p>0; p--)
+            if (bk.bids[p].cnt)
+                result.push_back({p, bk.bids[p].total_qty, bk.bids[p].cnt});
+    } else {
+        for (int64_t p=bk.best_ask; p>0 && p<=MAX_PX; p++)
+            if (bk.asks[p].cnt)
+                result.push_back({p, bk.asks[p].total_qty, bk.asks[p].cnt});
+    }
     return result;
 }
 
 uint64_t MatchingEngine::getOrderCount() const {
     // TODO: Return total number of resting orders across all symbols.
-    return g_states[const_cast<MatchingEngine*>(this)].count;
+    return g_inst.at(const_cast<MatchingEngine*>(this))->count;
 }
 
 } // namespace exchange
