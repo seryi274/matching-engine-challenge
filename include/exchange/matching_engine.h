@@ -3,11 +3,11 @@
 #include "types.h"
 #include <vector>
 #include <string>
-#include <unordered_map>
-#include <set>
-
 
 namespace exchange {
+
+struct EngineState;  // defined in matching_engine.cpp
+
 
 /// ============================================================
 ///  MatchingEngine
@@ -30,7 +30,6 @@ namespace exchange {
 ///
 /// ============================================================
 class MatchingEngine {
-
 public:
     /// Construct engine with a listener that receives trade/update callbacks.
     /// The listener pointer must remain valid for the engine's lifetime.
@@ -54,7 +53,7 @@ public:
     ///   7. Returns an OrderAck with the assigned order_id and status
     ///
     /// Reject if: price <= 0, quantity == 0, or symbol is empty.
-    OrderAck addOrder(const OrderRequest& request);
+    OrderAck addOrder(const OrderRequest& request) noexcept;
 
     // --------------------------------------------------------
     //  Order Cancellation
@@ -66,7 +65,7 @@ public:
     /// listener->onOrderUpdate() with status = Cancelled.
     ///
     /// Returns true if cancelled, false if order not found or already filled.
-    bool cancelOrder(uint64_t order_id);
+    bool cancelOrder(uint64_t order_id) noexcept;
 
     // --------------------------------------------------------
     //  Order Amendment
@@ -84,7 +83,7 @@ public:
     ///   - After amendment, the order MAY match against the opposite side
     ///
     /// Returns true if amended, false if order not found or invalid parameters.
-    bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity);
+    bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) noexcept;
 
     // --------------------------------------------------------
     //  Query (for testing / debugging -- NOT performance-critical)
@@ -117,42 +116,11 @@ private:
     //    - Pre-allocated order arrays with free lists
     // ============================================================
 
-    struct Order {
-        std::string symbol;     // Instrument identifier (e.g., "AAPL")
-        Side        side;
-        int64_t     price;      // Price in ticks (integer, always > 0 for limit)
-        uint64_t    timestamp;
-        uint64_t    order_id;
-        uint32_t    quantity;   // Number of lots (always > 0)
-    };
-
-    struct OrderCmp{
-        bool operator()(const Order& a, const Order& b) const {
-            if (a.side == Side::Buy) {
-                if (a.price != b.price) {
-                    return a.price > b.price;
-                } else {
-                    return a.timestamp < b.timestamp;
-                }
-            } else {
-                if (a.price != b.price) {
-                    return a.price < b.price;
-                } else {
-                    return a.timestamp < b.timestamp;
-                }
-            }
-        }
-    };
-    OrderStatus matchOrder(const Order& request);
-    
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
-    uint64_t  next_timestamp_id_ = 1;
-    uint32_t  next_symbol_id_ = 0;
 
-   std::unordered_map<std::string, uint32_t> stockToId;
-   std::unordered_map<uint64_t, Order> existingOrders;
-   std::vector<std::set<Order, OrderCmp>> book[2];
+    // typed pointer to per-instance state; defined in the .cpp
+    EngineState* state_ = nullptr;
 };
 
 }  // namespace exchange
