@@ -22,7 +22,7 @@ static const char* const SYMBOL_NAMES[N_SYMBOLS] = {
 // symbol resolver. s[2] is unique across our five tickers (P,O,F,Z,L)
 // so a single switch dispatches everything without nested compares.
 static __attribute__((always_inline)) inline
-int symbolToIndex(const std::string& s) {
+int symbolToIndex(const std::string& s) noexcept {
     if (s.size() < 4) return -1;
     switch (s[2]) {
         case 'P': return 0;   // aapl
@@ -84,7 +84,7 @@ struct EngineState {
 // --------------------------------------------------------------------------
 
 static __attribute__((always_inline)) inline
-uint32_t poolAcquire(EngineState& s) {
+uint32_t poolAcquire(EngineState& s) noexcept {
     if (s.freeHead) {
         uint32_t slot = s.freeHead;
         s.freeHead = s.orderPool[slot].next;
@@ -95,7 +95,7 @@ uint32_t poolAcquire(EngineState& s) {
 }
 
 static __attribute__((always_inline)) inline
-void poolRelease(EngineState& s, uint32_t slot) {
+void poolRelease(EngineState& s, uint32_t slot) noexcept {
     s.orderPool[slot].next = s.freeHead;
     s.freeHead = slot;
 }
@@ -105,7 +105,7 @@ void poolRelease(EngineState& s, uint32_t slot) {
 // --------------------------------------------------------------------------
 
 static __attribute__((always_inline)) inline
-void bucketPushBack(PriceBucket& b, EngineState& s, uint32_t slot) {
+void bucketPushBack(PriceBucket& b, EngineState& s, uint32_t slot) noexcept {
     Order& o = s.orderPool[slot];
     o.next = 0;
     o.prev = b.tail;
@@ -117,7 +117,7 @@ void bucketPushBack(PriceBucket& b, EngineState& s, uint32_t slot) {
 }
 
 static __attribute__((always_inline)) inline
-void bucketUnlink(PriceBucket& b, EngineState& s, uint32_t slot) {
+void bucketUnlink(PriceBucket& b, EngineState& s, uint32_t slot) noexcept {
     Order& o = s.orderPool[slot];
     if (o.prev) s.orderPool[o.prev].next = o.next; else b.head = o.next;
     if (o.next) s.orderPool[o.next].prev = o.prev; else b.tail = o.prev;
@@ -131,7 +131,7 @@ void bucketUnlink(PriceBucket& b, EngineState& s, uint32_t slot) {
 
 static __attribute__((always_inline)) inline
 void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t qty,
-               Book& book, EngineState& s)
+               Book& book, EngineState& s) noexcept
 {
     uint32_t slot = poolAcquire(s);
     Order& o  = s.orderPool[slot];
@@ -160,7 +160,7 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
 // Takes an order off the book and frees its slot. Also scans for the next
 // best price if we just emptied the best level (O(spread), O(1) typical).
 static __attribute__((always_inline)) inline
-void unrestOrder(uint32_t slot, Book& book, EngineState& s) {
+void unrestOrder(uint32_t slot, Book& book, EngineState& s) noexcept {
     Order& o = s.orderPool[slot];
     PriceBucket& bucket = (o.side == 0) ? book.bids[o.price] : book.asks[o.price];
     bucketUnlink(bucket, s, slot);
@@ -203,7 +203,7 @@ void unrestOrder(uint32_t slot, Book& book, EngineState& s) {
 template <Side SIDE>
 static __attribute__((always_inline)) inline
 uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty,
-                 Book& book, EngineState& s, Listener* listener)
+                 Book& book, EngineState& s, Listener* listener) noexcept
 {
     Trade&      trade = book.tradeBuf;  // symbol prefilled in ctor, reused across fills
     OrderUpdate upd;
@@ -219,7 +219,7 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
             while (qty > 0 && bucket.head) {
                 uint32_t slot = bucket.head;
                 Order&   rest = s.orderPool[slot];
-                __builtin_prefetch(&s.orderPool[rest.next], 0, 1);
+                if (rest.next) __builtin_prefetch(&s.orderPool[rest.next], 1, 1);
 
                 uint32_t fillQty = (qty < rest.qty) ? qty : rest.qty;
 
@@ -275,7 +275,7 @@ uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty
             while (qty > 0 && bucket.head) {
                 uint32_t slot = bucket.head;
                 Order&   rest = s.orderPool[slot];
-                __builtin_prefetch(&s.orderPool[rest.next], 0, 1);
+                if (rest.next) __builtin_prefetch(&s.orderPool[rest.next], 1, 1);
 
                 uint32_t fillQty = (qty < rest.qty) ? qty : rest.qty;
 
@@ -330,10 +330,9 @@ MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     // TODO: initialize internal state
     auto* s = new EngineState();
 
-    // resize + clear forces physical page allocation while keeping capacity.
-    // After this emplace_back() on the sentinel is essentially free.
-    s->orderPool.resize(1 << 22);          // 4M slots -- enough for adversarial
-    s->orderPool.clear();
+    // reserve big enough for adversarial depth, but don't pre-touch;
+    // OS maps pages lazily as we actually use them.
+    s->orderPool.reserve(1 << 22);         // 4M slots (adversarial safe)
     s->orderPool.emplace_back();           // pool[0] is the null sentinel
 
     // pre-touched in one call. 10.5M = 500k warmup + 10M measurement ops
@@ -353,7 +352,7 @@ MatchingEngine::~MatchingEngine() {
 
 // ----  addOrder  ----
 __attribute__((hot, flatten))
-OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
+OrderAck MatchingEngine::addOrder(const OrderRequest& request) noexcept {
     // reject obviously bad requests
     if (request.price <= 0 || request.quantity == 0) [[unlikely]]
         return {0, OrderStatus::Rejected};
@@ -397,7 +396,7 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
 
 // ----  cancelOrder  ----
 __attribute__((hot, flatten))
-bool MatchingEngine::cancelOrder(uint64_t order_id) {
+bool MatchingEngine::cancelOrder(uint64_t order_id) noexcept {
     EngineState& s = *state_;
     if (order_id >= s.idToSlot.size() || !s.idToSlot[order_id])
         return false;
@@ -410,7 +409,7 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
 
 // ----  amendOrder  ----
 __attribute__((hot, flatten))
-bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) {
+bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity) noexcept {
     if (new_price <= 0 || new_quantity == 0) return false;
 
     EngineState& s = *state_;
