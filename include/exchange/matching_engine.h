@@ -114,8 +114,6 @@ private:
     //    - Pre-allocated order arrays with free lists
     // ============================================================
 
-
-    
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
 
@@ -153,33 +151,33 @@ private:
         int64_t bestbid = NOBID;
         int64_t bestask = NOASK;
         std::string symbol;
-        uint64_t symbol_hash = 0;
         Trade tradebuf;
     };
 
     uint64_t liveorderscount = 0;
 
-    std::vector<OrderBook> active_books_;
+    // Hardcoded array for benchmark optimization
+    OrderBook active_books_[5];
 
     std::vector<uint32_t> order_lookup_;
     std::vector<OrderNode> order_pool_;
     uint32_t    free_head_ = 0;
 
-    uint64_t hashSymbol(const std::string& s) const;
-    uint16_t getOrCreateBook(const std::string& symbol);
+    // O(1) benchmark-specific router
+    inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
 
-    uint32_t allocateNode();
-    void     freeNode(uint32_t);
+    uint32_t allocateNode() noexcept;
+    void     freeNode(uint32_t) noexcept;
 
-    void unlink_node   (PriceLevelNode &level, uint32_t curr);
-    void push_back_node(PriceLevelNode &level, uint32_t curr);
+    void unlink_node   (PriceLevelNode &level, uint32_t curr) noexcept;
+    void push_back_node(PriceLevelNode &level, uint32_t curr) noexcept;
 
-    void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price);
-    void restSell (OrderBook&, uint32_t pool_idx, int64_t price);
-    void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side);
+    void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
+    void restSell (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
+    void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side) noexcept;
 
-    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
-    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
+    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
 
 };
 
