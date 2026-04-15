@@ -3,6 +3,7 @@
 #include "types.h"
 #include <vector>
 #include <string>
+#include <memory>
 
 namespace exchange {
 
@@ -113,10 +114,73 @@ private:
     //    - Pre-allocated order arrays with free lists
     // ============================================================
 
+
+    
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
 
     // TODO: Add your internal data structures here.
+
+    static constexpr int64_t MINPRICE = 1;
+    static constexpr int64_t MAXPRICE = 52000;
+    static constexpr size_t PRICESLOTS = MAXPRICE - MINPRICE + 1;
+    static constexpr int64_t NOBID = 0;
+    static constexpr int64_t NOASK = MAXPRICE + 1;
+
+    struct alignas(16) PriceLevelNode { //16 bytes
+        uint32_t head = 0;
+        uint32_t tail = 0;
+        uint32_t count = 0;
+        uint32_t filler = 0;
+    };
+
+    struct alignas(32) OrderNode { //32 bytes
+        uint64_t id;
+        int64_t price;
+        uint32_t quantity;
+        uint32_t next;
+        uint32_t prev;
+        uint16_t bookidx;
+        Side    side;
+        uint8_t filler;
+    };
+
+    struct OrderBook {
+        std::unique_ptr<PriceLevelNode[]> bidlevels;
+        std::unique_ptr<PriceLevelNode[]> asklevels;
+        uint32_t livebidlevels = 0;
+        uint32_t liveasklevels = 0;
+        int64_t bestbid = NOBID;
+        int64_t bestask = NOASK;
+        std::string symbol;
+        uint64_t symbol_hash = 0;
+        Trade tradebuf;
+    };
+
+    uint64_t liveorderscount = 0;
+
+    std::vector<OrderBook> active_books_;
+
+    std::vector<uint32_t> order_lookup_;
+    std::vector<OrderNode> order_pool_;
+    uint32_t    free_head_ = 0;
+
+    uint64_t hashSymbol(const std::string& s) const;
+    uint16_t getOrCreateBook(const std::string& symbol);
+
+    uint32_t allocateNode();
+    void     freeNode(uint32_t);
+
+    void unlink_node   (PriceLevelNode &level, uint32_t curr);
+    void push_back_node(PriceLevelNode &level, uint32_t curr);
+
+    void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price);
+    void restSell (OrderBook&, uint32_t pool_idx, int64_t price);
+    void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side);
+
+    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
+    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
+
 };
 
 }  // namespace exchange
