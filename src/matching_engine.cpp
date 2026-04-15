@@ -481,7 +481,7 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(const std::string& symbo
 }
 
 uint64_t MatchingEngine::getOrderCount() const {
-    return liveorderscount;
+    return liveorderscount; 
 }
 
 }  // namespace exchange

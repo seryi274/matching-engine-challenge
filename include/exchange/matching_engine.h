@@ -117,7 +117,7 @@ private:
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
     inline void removeOrder(OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price, Side side) noexcept;
     void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-    void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-};
+    void  matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+}; 
 
 }  // namespace exchange
