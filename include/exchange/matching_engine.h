@@ -3,6 +3,9 @@
 #include "types.h"
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <set>
+
 
 namespace exchange {
 
@@ -27,6 +30,7 @@ namespace exchange {
 ///
 /// ============================================================
 class MatchingEngine {
+
 public:
     /// Construct engine with a listener that receives trade/update callbacks.
     /// The listener pointer must remain valid for the engine's lifetime.
@@ -113,10 +117,42 @@ private:
     //    - Pre-allocated order arrays with free lists
     // ============================================================
 
+    struct Order {
+        std::string symbol;     // Instrument identifier (e.g., "AAPL")
+        Side        side;
+        int64_t     price;      // Price in ticks (integer, always > 0 for limit)
+        uint64_t    timestamp;
+        uint64_t    order_id;
+        uint32_t    quantity;   // Number of lots (always > 0)
+    };
+
+    struct OrderCmp{
+        bool operator()(const Order& a, const Order& b) const {
+            if (a.side == Side::Buy) {
+                if (a.price != b.price) {
+                    return a.price > b.price;
+                } else {
+                    return a.timestamp < b.timestamp;
+                }
+            } else {
+                if (a.price != b.price) {
+                    return a.price < b.price;
+                } else {
+                    return a.timestamp < b.timestamp;
+                }
+            }
+        }
+    };
+    OrderStatus matchOrder(const Order& request);
+    
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
+    uint64_t  next_timestamp_id_ = 1;
+    uint32_t  next_symbol_id_ = 0;
 
-    // TODO: Add your internal data structures here.
+   std::unordered_map<std::string, uint32_t> stockToId;
+   std::unordered_map<uint64_t, Order> existingOrders;
+   std::vector<std::set<Order, OrderCmp>> book[2];
 };
 
 }  // namespace exchange
