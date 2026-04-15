@@ -8,6 +8,7 @@
 namespace exchange {
 
 // constants
+// ftw
 static constexpr int64_t MAX_TICK  = 50200;    // fair value <= 50k + spread 200
 static constexpr int     N_SYMBOLS = 5;
 static const char* const SYMBOL_NAMES[N_SYMBOLS] = {
