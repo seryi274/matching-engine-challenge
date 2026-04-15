@@ -197,7 +197,6 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
         return OrderAck{order_id, OrderStatus::Accepted};
     } else {
         listener_->onOrderUpdate(OrderUpdate{order_id, OrderStatus::Filled, 0});
-        uint32_t order_idx = g_orders.size();
         g_orders.push_back({order_id, request.price, 0, sym_id, request.side, false, 0, 0}); // keep ID valid
         return OrderAck{order_id, OrderStatus::Filled};
     }
