@@ -57,12 +57,17 @@ struct PriceBucket {
     uint32_t totalQty = 0;
 };
 
-/* One book per symbol. 1.6 MB each -- flat arrays beat any tree here. */
+/* One book per symbol. 1.6 MB each -- flat arrays beat any tree here.
+ * Trade buffer is embedded so the symbol string lives in the book,
+ * pre-filled once at construction (Kappa-style reuse). */
 struct Book {
     PriceBucket bids[MAX_TICK + 1];
     PriceBucket asks[MAX_TICK + 1];
-    int64_t bestBid = 0;
-    int64_t bestAsk = 0;
+    int64_t  bestBid = 0;
+    int64_t  bestAsk = 0;
+    uint32_t liveBidLevels = 0;  // occupied bid tick-buckets
+    uint32_t liveAskLevels = 0;  // occupied ask tick-buckets
+    Trade    tradeBuf;           // symbol prefilled in MatchingEngine ctor
 };
 
 // per-instance engine state, held through MatchingEngine::state_.
@@ -137,11 +142,14 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
     o.side    = (uint8_t)side;
 
     PriceBucket& bucket = (side == Side::Buy) ? book.bids[price] : book.asks[price];
+    const bool freshLevel = (bucket.head == 0);
     bucketPushBack(bucket, s, slot);
 
     if (side == Side::Buy) {
+        if (freshLevel) ++book.liveBidLevels;
         if (!book.bestBid || price > book.bestBid) book.bestBid = price;
     } else {
+        if (freshLevel) ++book.liveAskLevels;
         if (!book.bestAsk || price < book.bestAsk) book.bestAsk = price;
     }
 
@@ -159,12 +167,22 @@ void unrestOrder(uint32_t slot, Book& book, EngineState& s) {
 
     if (!bucket.head) {
         if (o.side == 0) {
-            while (book.bestBid > 0 && !book.bids[book.bestBid].head)
-                --book.bestBid;
+            --book.liveBidLevels;
+            if (!book.liveBidLevels) {
+                book.bestBid = 0;
+            } else {
+                while (book.bestBid > 0 && !book.bids[book.bestBid].head)
+                    --book.bestBid;
+            }
         } else {
-            while (book.bestAsk <= MAX_TICK && !book.asks[book.bestAsk].head)
-                ++book.bestAsk;
-            if (book.bestAsk > MAX_TICK) [[unlikely]] book.bestAsk = 0;
+            --book.liveAskLevels;
+            if (!book.liveAskLevels) {
+                book.bestAsk = 0;
+            } else {
+                while (book.bestAsk <= MAX_TICK && !book.asks[book.bestAsk].head)
+                    ++book.bestAsk;
+                if (book.bestAsk > MAX_TICK) [[unlikely]] book.bestAsk = 0;
+            }
         }
     }
 
@@ -184,12 +202,11 @@ void unrestOrder(uint32_t slot, Book& book, EngineState& s) {
 
 template <Side SIDE>
 static __attribute__((always_inline)) inline
-uint32_t doMatch(uint64_t aggId, uint8_t symIdx, int64_t limit, uint32_t qty,
+uint32_t doMatch(uint64_t aggId, uint8_t /*symIdx*/, int64_t limit, uint32_t qty,
                  Book& book, EngineState& s, Listener* listener)
 {
-    Trade       trade;
+    Trade&      trade = book.tradeBuf;  // symbol prefilled in ctor, reused across fills
     OrderUpdate upd;
-    trade.symbol = SYMBOL_NAMES[symIdx];
 
     if constexpr (SIDE == Side::Buy) {
         trade.buy_order_id = aggId;
@@ -235,10 +252,15 @@ uint32_t doMatch(uint64_t aggId, uint8_t symIdx, int64_t limit, uint32_t qty,
             }
 
             if (!bucket.head) {
+                --book.liveAskLevels;
+                if (!book.liveAskLevels) {
+                    book.bestAsk = 0;
+                    break;
+                }
                 book.bestAsk = execPrice + 1;
                 while (book.bestAsk <= MAX_TICK && !book.asks[book.bestAsk].head)
                     ++book.bestAsk;
-                if (book.bestAsk > MAX_TICK) [[unlikely]] book.bestAsk = 0;
+                if (book.bestAsk > MAX_TICK) [[unlikely]] { book.bestAsk = 0; break; }
             }
         }
     } else {
@@ -286,6 +308,11 @@ uint32_t doMatch(uint64_t aggId, uint8_t symIdx, int64_t limit, uint32_t qty,
             }
 
             if (!bucket.head) {
+                --book.liveBidLevels;
+                if (!book.liveBidLevels) {
+                    book.bestBid = 0;
+                    break;
+                }
                 book.bestBid = execPrice - 1;
                 while (book.bestBid > 0 && !book.bids[book.bestBid].head)
                     --book.bestBid;
@@ -311,6 +338,11 @@ MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
 
     // pre-touched in one call. 10.5M = 500k warmup + 10M measurement ops
     s->idToSlot.assign(10500001, 0);
+
+    // prefill the trade buffer symbol per book, so matching never touches the string
+    for (int i = 0; i < N_SYMBOLS; ++i) {
+        s->books[i].tradeBuf.symbol = SYMBOL_NAMES[i];
+    }
 
     state_ = s;
 }
