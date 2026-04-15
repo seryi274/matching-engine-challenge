@@ -1,5 +1,6 @@
 #include "exchange/matching_engine.h"
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -50,10 +51,12 @@ struct Book {
     int64_t best_ask=0;       // lowest  occupied ask price  (0 = empty)
 };
 
+static constexpr size_t ID_MAX = 10'500'001;
+
 struct State {
     Book   books[NSYMS];
     std::vector<Order>    pool;         // pool[0] = null sentinel, grows as needed
-    std::vector<uint32_t> id_to_slot;   // id_to_slot[order_id] = pool slot, 0 = not resting
+    std::unique_ptr<uint32_t[]> id_to_slot;  // raw heap array, size ID_MAX
     uint32_t free_head = 0;             // pseudo stack
     uint64_t count = 0;
 };
@@ -149,12 +152,14 @@ void remove_order(uint32_t s, Book& bk, State& st) {
 
 // Core matching loop
 
-uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
-                  Book& bk, State& st, Listener* L)
+template<Side SIDE>
+__attribute__((always_inline)) inline
+uint32_t do_match_impl(uint64_t id, uint8_t sym, int64_t price, uint32_t qty,
+                       Book& bk, State& st, Listener* L)
 {
     const char* name = SYM_NAME[sym];
 
-    if (side == Side::Buy) {
+    if constexpr (SIDE == Side::Buy) {
         // Sweep asks cheapest-first while ask <= buy price
         while (qty>0 && bk.best_ask>0 && bk.best_ask<=price) {
             int64_t p = bk.best_ask;
@@ -163,12 +168,13 @@ uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t q
             while (qty>0 && lv.head) {
                 uint32_t s = lv.head;
                 Order& r = st.pool[s];
+                __builtin_prefetch(&st.pool[r.next], 0, 1);  // prefetch next in chain
                 uint32_t f = std::min(qty, r.qty);
 
                 L->onTrade({id, r.id, name, p, f});
                 qty-=f;  r.qty-=f;  lv.total_qty-=f;
 
-                if (!r.qty) {
+                if (!r.qty) [[likely]] {  // fully-consume is the common case in a sweep
                     L->onOrderUpdate({r.id, OrderStatus::Filled, 0});
                     lv.head = r.next;
                     if (lv.head) st.pool[lv.head].prev=0; else lv.tail=0;
@@ -183,10 +189,10 @@ uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t q
             if (!lv.head) {  // level exhausted, advance best ask
                 bk.best_ask = p+1;
                 while (bk.best_ask<=MAX_PX && !bk.asks[bk.best_ask].head) bk.best_ask++;
-                if (bk.best_ask>MAX_PX) bk.best_ask=0;
+                if (bk.best_ask>MAX_PX) [[unlikely]] bk.best_ask=0;
             }
         }
-    } else {
+    } else {  // Side::Sell
         // Sweep bids highest-first while bid >= sell price
         while (qty>0 && bk.best_bid>0 && bk.best_bid>=price) {
             int64_t p = bk.best_bid;
@@ -195,12 +201,13 @@ uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t q
             while (qty>0 && lv.head) {
                 uint32_t s = lv.head;
                 Order& r = st.pool[s];
+                __builtin_prefetch(&st.pool[r.next], 0, 1);  // prefetch next in chain
                 uint32_t f = std::min(qty, r.qty);
 
                 L->onTrade({r.id, id, name, p, f});
                 qty-=f;  r.qty-=f;  lv.total_qty-=f;
 
-                if (!r.qty) {
+                if (!r.qty) [[likely]] {
                     L->onOrderUpdate({r.id, OrderStatus::Filled, 0});
                     lv.head = r.next;
                     if (lv.head) st.pool[lv.head].prev=0; else lv.tail=0;
@@ -221,6 +228,16 @@ uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t q
     return qty;
 }
 
+__attribute__((always_inline)) inline
+uint32_t do_match(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t qty,
+                  Book& bk, State& st, Listener* L)
+{
+    if (side == Side::Buy)
+        return do_match_impl<Side::Buy >(id, sym, price, qty, bk, st, L);
+    else
+        return do_match_impl<Side::Sell>(id, sym, price, qty, bk, st, L);
+}
+
 }
 
 // ================= MatchingEngine ==========================================
@@ -231,9 +248,13 @@ MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     // TODO: Initialize your data structures here.
     auto st = std::make_unique<State>();
     // Pre-allocate and pre-touch all memory so the hot path has no page faults.
-    st->pool.reserve(1<<22);              // 4M slots = 128MB (covers adversarial peak depth)
+    // Pre-touch: resize to force physical page allocation, then clear.
+    st->pool.resize(1<<20);
+    st->pool.clear();
     st->pool.emplace_back();              // pool[0] = null sentinel
-    st->id_to_slot.assign(10'500'001, 0); // pre-touches 42MB; 0 = not resting (includes sentinel)
+    // Raw heap array, zero-initialized, pre-touched via explicit memset to ensure pages are mapped.
+    st->id_to_slot = std::unique_ptr<uint32_t[]>(new uint32_t[ID_MAX]());
+    std::memset(st->id_to_slot.get(), 0, ID_MAX * sizeof(uint32_t));
     State* raw = st.get();
     g_inst[this]    = std::move(st);
     g_cached_engine = this;               // prime the thread-local cache
@@ -310,7 +331,7 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
     // If not found (or already filled/cancelled):
     //   Return false
     State& st = get_state(this);
-    if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
+    if (order_id >= ID_MAX || !st.id_to_slot[order_id]) return false;
 
     uint32_t s = st.id_to_slot[order_id];
     remove_order(s, st.books[st.pool[s].sym], st);
@@ -338,7 +359,7 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     //
     // If not found: return false
     State& st = get_state(this);
-    if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
+    if (order_id >= ID_MAX || !st.id_to_slot[order_id]) return false;
 
     uint32_t s = st.id_to_slot[order_id];
     Order&   o = st.pool[s];
