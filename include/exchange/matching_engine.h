@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstdlib>
 
 namespace exchange {
 
@@ -116,19 +117,19 @@ private:
 
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
+    uint64_t  liveorderscount = 0;
 
     static constexpr int64_t MINPRICE = 1;
     static constexpr int64_t MAXPRICE = 52000;
     static constexpr int64_t NOBID = 0;
     static constexpr int64_t NOASK = MAXPRICE + 1;
+    static constexpr uint32_t MAX_CAPACITY = 12000000; // 12 Million Safe Limit
 
-    // Compressed to 8 Bytes
     struct PriceLevelNode { 
         uint32_t head = 0;
         uint32_t tail = 0;
     };
 
-    // Compressed to exactly 16 Bytes (4 nodes per cache line)
     struct alignas(16) OrderNode { 
         uint32_t id;
         uint32_t quantity;
@@ -136,16 +137,7 @@ private:
         uint32_t prev;
     };
 
-    // Packed to exactly 8 Bytes for O(1) cancel/amend metadata
-    struct LookupEntry {
-        uint32_t pool_idx = 0;
-        uint16_t price = 0;
-        uint8_t  bookidx = 0;
-        Side     side = Side::Buy;
-    };
-
-    // Entirely flattened struct to avoid pointer dereferences
-    struct OrderBook {
+    struct alignas(64) OrderBook {
         PriceLevelNode bidlevels[MAXPRICE + 2];
         PriceLevelNode asklevels[MAXPRICE + 2];
         int64_t bestbid = NOBID;
@@ -156,30 +148,24 @@ private:
         Trade tradebuf;
     };
 
-    uint64_t liveorderscount = 0;
-
-    // Allocated on the heap to avoid a massive stack footprint
-    std::unique_ptr<OrderBook[]> active_books_;
-
-    std::vector<LookupEntry> order_lookup_;
-    std::vector<OrderNode> order_pool_;
-    
-    // Discrete stack allocator to keep OrderNode cache lines clean
-    std::vector<uint32_t> free_stack_;
+    // Naked raw pointers mapped to cache-aligned memory
+    OrderBook* __restrict__ active_books_ = nullptr;
+    uint64_t* __restrict__ order_lookup_ = nullptr;
+    OrderNode* __restrict__ order_pool_   = nullptr;
+    uint32_t* __restrict__ free_stack_   = nullptr;
     uint32_t free_top_ = 0;
 
+    // Bitwise Packing for Lookup
+    inline uint64_t packLookup(uint32_t pool_idx, int64_t price, uint8_t bookidx, Side side) const noexcept {
+        return (uint64_t)pool_idx | ((uint64_t)price << 32) | ((uint64_t)bookidx << 60) | ((uint64_t)(side == Side::Buy ? 1 : 0) << 63);
+    }
+    inline uint32_t unpackPoolIdx(uint64_t l) const noexcept { return (uint32_t)l; }
+    inline int64_t  unpackPrice(uint64_t l) const noexcept   { return (int64_t)((l >> 32) & 0xFFFFFFF); }
+    inline uint8_t  unpackBookIdx(uint64_t l) const noexcept { return (uint8_t)((l >> 60) & 0x7); }
+    inline Side     unpackSide(uint64_t l) const noexcept    { return (l >> 63) ? Side::Buy : Side::Sell; }
+
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
-
-    inline uint32_t allocateNode() noexcept;
-    inline void     freeNode(uint32_t) noexcept;
-
-    inline void unlink_node   (PriceLevelNode &__restrict__ level, uint32_t curr) noexcept;
-    inline void push_back_node(PriceLevelNode &__restrict__ level, uint32_t curr) noexcept;
-
-    inline void restBuy  (OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price) noexcept;
-    inline void restSell (OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price) noexcept;
     inline void removeOrder(OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price, Side side) noexcept;
-
     void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
     void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
 
