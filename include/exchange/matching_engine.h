@@ -177,26 +177,6 @@ namespace exchange {
             return order_list.erase(order_it);
         }
 
-        template<bool NegativePrice = false>
-        std::vector<PriceLevel> getBookSideSnapshot(const std::map<int64_t, std::list<Order>>& book) const {
-            std::vector<PriceLevel> prices(book.size());
-            auto prices_it = prices.begin();
-            for (const auto& [price, orders_list] : book) {
-                // CONSTEXPR ALL THE THINGS.
-                if constexpr (NegativePrice) prices_it->price = -price;
-                else prices_it->price = price;
-
-                prices_it->order_count = 0;
-                for (const auto& [_, quantity] : orders_list) {
-                    ++prices_it->order_count;
-                    prices_it->total_quantity += quantity;
-                }
-                ++prices_it;
-            }
-
-            return prices;
-        }
-
         struct OrderActiveMatch {
             std::string symbol;
             int64_t price;
@@ -238,7 +218,7 @@ namespace exchange {
 
                 if (0 < active_price + current_price) break;
 
-                while (active_quantity > 0 && current_order_it != current_order_list_p->end()) {
+                do {
                     auto& [resting_order_id, resting_quantity] = *current_order_it;
                     const uint32_t trade_quantity = std::min(resting_quantity, active_quantity);
 
@@ -271,7 +251,7 @@ namespace exchange {
 
                     if (current_order_it == current_order_list_p->end()) break;
                     ++current_order_it;
-                }
+                } while (active_quantity > 0 && current_order_it != current_order_list_p->end());
                 if (current_order_list_p->empty()) {
                     current_price_it = book->erase(current_price_it);
                 } else ++current_price_it;
@@ -283,7 +263,8 @@ namespace exchange {
 
                 this->order_lookup_.insert_or_assign(active_order_id,
                                                      OrderLookupInfo{
-                                                         active_price, std::prev(current_list.end()), &current_list, book_it
+                                                         active_price, std::prev(current_list.end()), &current_list,
+                                                         book_it
                                                      }
                 );
 

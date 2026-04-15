@@ -221,10 +221,8 @@ namespace exchange {
 
         auto& info_it = lookup_it->second;
 
-        bool price_changed = std::abs(info_it.price) != new_price;
 
-
-        if (!price_changed) {
+        if (std::abs(info_it.price) == new_price) {
             if (info_it.order_it->quantity == new_quantity) return true;
 
             if (info_it.order_it->quantity > new_quantity) {
@@ -235,12 +233,6 @@ namespace exchange {
                 return true;
             }
 
-        // loses priority
-        // we use std::list<Order>::splice !!! maybe not
-
-        // this code moves the list, but works fine if the price doesn't change. we do need the splice anyways.
-
-
             info_it.list_p->splice(info_it.list_p->end(), *info_it.list_p, info_it.order_it);
             info_it.order_it = std::prev(info_it.list_p->end());
             info_it.order_it->quantity = new_quantity;
@@ -250,6 +242,7 @@ namespace exchange {
             return true;
         }
         info_it.list_p->erase(info_it.order_it);
+        if (info_it.list_p->empty()) info_it.getPriceMap().erase(info_it.price);
 
 
         new_price *= (info_it.price > 0);
@@ -281,9 +274,24 @@ namespace exchange {
         const auto& books_it = books_.find(symbol);
         if (books_it == books_.end()) return {};
 
-        return side == Side::Buy
-                   ? getBookSideSnapshot<true>(books_it->second.bids)
-                   : getBookSideSnapshot<false>(books_it->second.asks);
+
+        const bool is_buy = side == Side::Buy;
+        const auto& book = is_buy ? books_it->second.bids : books_it->second.asks;
+
+        std::vector<PriceLevel> prices(book.size());
+        auto prices_it = prices.begin();
+        for (const auto& [price, orders_list] : book) {
+            // CONSTEXPR ALL THE THINGS.
+            prices_it->price = (is_buy) ? -price : price;
+            prices_it->order_count = 0;
+            for (const auto& [_, quantity] : orders_list) {
+                ++prices_it->order_count;
+                prices_it->total_quantity += quantity;
+            }
+            ++prices_it;
+        }
+
+        return prices;
     }
 
     uint64_t MatchingEngine::getOrderCount() const {
