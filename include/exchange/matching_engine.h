@@ -68,7 +68,7 @@ public:
     uint64_t getOrderCount() const;
 
 private:
-    Listener* listener_;
+    Listener* __restrict__ listener_;
     uint64_t  next_order_id_ = 1;
     uint64_t  liveorderscount = 0;
 
@@ -91,7 +91,7 @@ private:
     };
 
     struct alignas(64) OrderBook {
-        uint64_t bid_bits[815]; // 52001 / 64 = 812. Safe margin 815.
+        uint64_t bid_bits[815]; 
         uint64_t ask_bits[815];
         PriceLevelNode bidlevels[MAXPRICE + 2];
         PriceLevelNode asklevels[MAXPRICE + 2];
@@ -117,7 +117,7 @@ private:
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
     inline void removeOrder(OrderBook &__restrict__ book, uint32_t pool_idx, int64_t price, Side side) noexcept;
     void matchBuy (OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-    void  matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-}; 
+    void matchSell(OrderBook &__restrict__ book, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+};
 
 }  // namespace exchange
