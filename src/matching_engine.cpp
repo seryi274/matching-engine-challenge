@@ -9,13 +9,13 @@ MatchingEngine::MatchingEngine(Listener* listener)
     order_lookup_.resize(11000000, 0);
     
     // Scale the pool up safely for the adversarial scenario
-    order_pool_.resize(5000000); 
+    order_pool_.resize(5200001); 
     
     // Build the free-list bound to the 5,000,000 size
-    for(uint32_t i = 1; i < 4999999; ++i) {
+    for(uint32_t i = 1; i < 5200000; ++i) {
         order_pool_[i].next = i + 1;
     }
-    order_pool_[4999999].next = 0;
+    order_pool_[5200000].next = 0;
     free_head_ = 1;
 
     // Initialize books
