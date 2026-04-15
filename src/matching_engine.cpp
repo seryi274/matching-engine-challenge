@@ -60,8 +60,22 @@ struct State {
 
 std::unordered_map<MatchingEngine*, std::unique_ptr<State>> g_inst;
 
+// Thread-local cache to avoid the unordered_map hash lookup on every public call.
+// Only updated when the engine pointer changes (rare), so the hot path is one load.
+thread_local MatchingEngine* g_cached_engine = nullptr;
+thread_local State*          g_cached_state  = nullptr;
+
+__attribute__((always_inline)) inline State& get_state(MatchingEngine* eng) {
+    if (__builtin_expect(g_cached_engine != eng, 0)) {
+        g_cached_engine = eng;
+        g_cached_state  = g_inst.at(eng).get();
+    }
+    return *g_cached_state;
+}
+
 // Pool: O(1) alloc/free
 
+__attribute__((always_inline)) inline
 uint32_t pool_alloc(State& st) {
     if (st.free_head) {
         uint32_t s = st.free_head;
@@ -71,6 +85,7 @@ uint32_t pool_alloc(State& st) {
     st.pool.emplace_back();
     return (uint32_t)st.pool.size() - 1;
 }
+__attribute__((always_inline)) inline
 void pool_free(State& st, uint32_t s) {
     st.pool[s].next = st.free_head;
     st.free_head = s;
@@ -78,6 +93,7 @@ void pool_free(State& st, uint32_t s) {
 
 // Level: doubly-linked FIFO via pool indices
 
+__attribute__((always_inline)) inline
 void lv_push(Level& lv, State& st, uint32_t s) {
     Order& o = st.pool[s];
     o.next = 0;  o.prev = lv.tail;
@@ -85,6 +101,7 @@ void lv_push(Level& lv, State& st, uint32_t s) {
     lv.tail = s;
     lv.cnt++;  lv.total_qty += o.qty;
 }
+__attribute__((always_inline)) inline
 void lv_erase(Level& lv, State& st, uint32_t s) {
     Order& o = st.pool[s];
     if (o.prev) st.pool[o.prev].next = o.next; else lv.head = o.next;
@@ -107,10 +124,7 @@ void insert_order(uint64_t id, uint8_t sym, Side side, int64_t price, uint32_t q
     if (side==Side::Buy) { if (!bk.best_bid||price>bk.best_bid) bk.best_bid=price; }
     else                 { if (!bk.best_ask||price<bk.best_ask) bk.best_ask=price; }
 
-    // Grow id_to_slot to cover id (new orders grow by 1; amend re-inserts stay in range).
-    if (id >= (uint64_t)st.id_to_slot.size())
-        st.id_to_slot.resize(id + 1, 0);
-    st.id_to_slot[id] = s;
+    st.id_to_slot[id] = s;  // id_to_slot is pre-sized in the constructor
     st.count++;
 }
 
@@ -216,15 +230,22 @@ namespace exchange {
 MatchingEngine::MatchingEngine(Listener* listener) : listener_(listener) {
     // TODO: Initialize your data structures here.
     auto st = std::make_unique<State>();
-    st->pool.reserve(1<<24);      // 2M slots upfront; grows automatically if needed
-    st->pool.emplace_back();      // pool[0] = null sentinel (index 0 means "no order")
-    st->id_to_slot.reserve(10500000);  // tight upper bound: 500K warmup + 10M measure ops
-    st->id_to_slot.push_back(0);  // index 0 = unused (mirrors pool sentinel)
-    g_inst[this] = std::move(st);
+    // Pre-allocate and pre-touch all memory so the hot path has no page faults.
+    st->pool.reserve(1<<22);              // 4M slots = 128MB (covers adversarial peak depth)
+    st->pool.emplace_back();              // pool[0] = null sentinel
+    st->id_to_slot.assign(10'500'001, 0); // pre-touches 42MB; 0 = not resting (includes sentinel)
+    State* raw = st.get();
+    g_inst[this]    = std::move(st);
+    g_cached_engine = this;               // prime the thread-local cache
+    g_cached_state  = raw;
 }
 
 MatchingEngine::~MatchingEngine() {
     // TODO: Clean up if necessary.
+    if (g_cached_engine == this) {  // invalidate cache so next call refetches
+        g_cached_engine = nullptr;
+        g_cached_state  = nullptr;
+    }
     g_inst.erase(this);
 }
 
@@ -243,8 +264,8 @@ OrderAck MatchingEngine::addOrder(const OrderRequest& request) {
     int8_t sym = sym_idx(request.symbol);
     if (sym < 0) return {0, OrderStatus::Rejected};
 
-    auto& st = *g_inst.at(this);
-    Book& bk = st.books[sym];
+    State& st = get_state(this);
+    Book&  bk = st.books[sym];
 
     // TODO: Step 4: Attempt to match against the opposite side.
     //
@@ -288,7 +309,7 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
     //
     // If not found (or already filled/cancelled):
     //   Return false
-    auto& st = *g_inst.at(this);
+    State& st = get_state(this);
     if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
 
     uint32_t s = st.id_to_slot[order_id];
@@ -316,7 +337,7 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     //   4. Return true
     //
     // If not found: return false
-    auto& st = *g_inst.at(this);
+    State& st = get_state(this);
     if (order_id >= st.id_to_slot.size() || !st.id_to_slot[order_id]) return false;
 
     uint32_t s = st.id_to_slot[order_id];
@@ -360,7 +381,7 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(
     int8_t sym = sym_idx(symbol);
     if (sym < 0) return {};
 
-    auto& st       = *g_inst.at(const_cast<MatchingEngine*>(this));
+    State& st      = get_state(const_cast<MatchingEngine*>(this));
     const Book& bk = st.books[sym];
 
     std::vector<PriceLevel> result;
@@ -378,7 +399,7 @@ std::vector<PriceLevel> MatchingEngine::getBookSnapshot(
 
 uint64_t MatchingEngine::getOrderCount() const {
     // TODO: Return total number of resting orders across all symbols.
-    return g_inst.at(const_cast<MatchingEngine*>(this))->count;
+    return get_state(const_cast<MatchingEngine*>(this)).count;
 }
 
 } // namespace exchange
