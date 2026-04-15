@@ -8,12 +8,7 @@
 #include <memory>
 #include <vector>
 
-/*
- * Matching engine implementation.
- *
- * Price-time priority, flat per-tick arrays, intrusive FIFO queues,
- * order pool with recycling. Tuned for the benchmark's 5 symbols.
- */
+// Imp
 
 namespace exchange {
 
