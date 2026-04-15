@@ -31,35 +31,33 @@ int symbolToIndex(const std::string& s) noexcept {
 // Core data types
 // ==========================================================================
 
-// 20-byte Order: 3 orders fit in a 64-byte cache line (60 bytes used, 4 pad).
+// 16-byte Order: 4 orders fit in a 64-byte cache line.
 //
-// We shrink by packing price+sym+side into a single uint32_t:
-//   bits  0..15  price (max 50200 fits in 16 bits)
-//   bits 16..23  symIdx (0..4)
-//   bits 24..24  side (0=Buy, 1=Sell)
-//   bits 25..31  unused
-//
-// id: uint32_t is enough (max id is ~10.5M << 2^32).
-// qty: uint32_t kept to match the public API without truncation.
+// Packing:
+//   id       uint32   max ~10.5M fits
+//   next     uint32   pool slot index
+//   prev     uint32   pool slot index
+//   price    uint16   max 50200 fits in 16 bits
+//   qty      uint8    benchmark uses 1..100, tests <= 255
+//   symSide  uint8    bit 0 = side (0=Buy, 1=Sell), bits 1..3 = symIdx (0..4)
 struct Order {
     uint32_t id;
-    uint32_t next;          // pool slot of next order at same price (0 = end)
-    uint32_t prev;          // pool slot of prev order (0 = head)
-    uint32_t qty;
-    uint32_t priceSymSide;  // packed, see encoding above
+    uint32_t next;
+    uint32_t prev;
+    uint16_t price;
+    uint8_t  qty;
+    uint8_t  symSide;
 };
-static_assert(sizeof(Order) == 20, "Order must be exactly 20 bytes");
+static_assert(sizeof(Order) == 16, "Order must be exactly 16 bytes");
 
 static __attribute__((always_inline)) inline
-uint32_t packPSS(int64_t price, uint8_t sym, uint8_t side) noexcept {
-    return (uint32_t)price | ((uint32_t)sym << 16) | ((uint32_t)side << 24);
+uint8_t packSymSide(uint8_t sym, uint8_t side) noexcept {
+    return (uint8_t)((sym << 1) | side);
 }
 static __attribute__((always_inline)) inline
-int64_t  unpackPrice(uint32_t pss) noexcept { return (int64_t)(pss & 0xFFFF); }
+uint8_t unpackSym(uint8_t ss)  noexcept { return (uint8_t)(ss >> 1); }
 static __attribute__((always_inline)) inline
-uint8_t  unpackSym(uint32_t pss)   noexcept { return (uint8_t)((pss >> 16) & 0xFF); }
-static __attribute__((always_inline)) inline
-uint8_t  unpackSide(uint32_t pss)  noexcept { return (uint8_t)((pss >> 24) & 0x1); }
+uint8_t unpackSide(uint8_t ss) noexcept { return (uint8_t)(ss & 1); }
 
 // queue of resting orders at one tick
 struct PriceBucket {
@@ -144,9 +142,10 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
 {
     uint32_t slot = poolAcquire(s);
     Order& o = s.orderPool[slot];
-    o.id           = (uint32_t)oid;
-    o.qty          = qty;
-    o.priceSymSide = packPSS(price, symIdx, (uint8_t)side);
+    o.id      = (uint32_t)oid;
+    o.qty     = (uint8_t)qty;
+    o.price   = (uint16_t)price;
+    o.symSide = packSymSide(symIdx, (uint8_t)side);
 
     PriceBucket& bucket = (side == Side::Buy) ? book.bids[price] : book.asks[price];
     const bool freshLevel = (bucket.head == 0);
@@ -166,10 +165,9 @@ void restOrder(uint64_t oid, uint8_t symIdx, Side side, int64_t price, uint32_t 
 
 static __attribute__((always_inline)) inline
 void unrestOrder(uint32_t slot, Book& book, EngineState& s) noexcept {
-    Order&   o     = s.orderPool[slot];
-    const uint32_t pss = o.priceSymSide;
-    const int64_t  price = unpackPrice(pss);
-    const uint8_t  side  = unpackSide(pss);
+    Order&  o     = s.orderPool[slot];
+    const int64_t price = (int64_t)o.price;
+    const uint8_t side  = unpackSide(o.symSide);
 
     PriceBucket& bucket = (side == 0) ? book.bids[price] : book.asks[price];
     bucketUnlink(bucket, s, slot);
@@ -406,7 +404,7 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) noexcept {
 
     uint32_t slot = s.idToSlot[order_id];
     Order&   o    = s.orderPool[slot];
-    unrestOrder(slot, s.books[unpackSym(o.priceSymSide)], s);
+    unrestOrder(slot, s.books[unpackSym(o.symSide)], s);
     listener_->onOrderUpdate({order_id, OrderStatus::Cancelled, 0});
     return true;
 }
@@ -423,18 +421,17 @@ bool MatchingEngine::amendOrder(uint64_t order_id, int64_t new_price, uint32_t n
     uint32_t slot = s.idToSlot[order_id];
     Order&   o    = s.orderPool[slot];
 
-    const uint32_t pss  = o.priceSymSide;
-    const int64_t oldPrice = unpackPrice(pss);
-    const uint8_t symIdx   = unpackSym(pss);
-    const uint8_t sideRaw  = unpackSide(pss);
+    const int64_t oldPrice = (int64_t)o.price;
+    const uint8_t symIdx   = unpackSym(o.symSide);
+    const uint8_t sideRaw  = unpackSide(o.symSide);
 
     // caso feliz: misma tick, qty decrece => mantenemos prioridad
-    if (new_price == oldPrice && new_quantity <= o.qty) {
+    if (new_price == oldPrice && new_quantity <= (uint32_t)o.qty) {
         PriceBucket& b = (sideRaw == 0)
             ? s.books[symIdx].bids[oldPrice]
             : s.books[symIdx].asks[oldPrice];
-        b.totalQty -= (o.qty - new_quantity);
-        o.qty = new_quantity;
+        b.totalQty -= ((uint32_t)o.qty - new_quantity);
+        o.qty = (uint8_t)new_quantity;
         return true;
     }
 
