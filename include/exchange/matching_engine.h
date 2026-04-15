@@ -1,11 +1,13 @@
 #pragma once
 
-// sanity check build
 #include "types.h"
 #include <vector>
 #include <string>
 
 namespace exchange {
+
+struct EngineState;  // defined in matching_engine.cpp
+
 
 /// ============================================================
 ///  MatchingEngine
@@ -97,74 +99,28 @@ public:
 
 private:
     // ============================================================
-    //  STUDENT: Internal data structures and helpers.
+    //  STUDENT: Add your data structures here.
+    //
+    //  Suggested starting point (naive but correct):
+    //    - std::unordered_map<std::string, OrderBook> books_
+    //      where OrderBook contains two std::map<int64_t, std::list<Order>>
+    //      (one for bids sorted descending, one for asks sorted ascending)
+    //    - std::unordered_map<uint64_t, pointer/iterator> order_lookup_
+    //      for O(1) cancel/amend by order_id
+    //
+    //  Better approaches to explore:
+    //    - Flat sorted arrays with binary search
+    //    - Custom memory pools / arena allocators
+    //    - Cache-aligned price level nodes
+    //    - Intrusive linked lists
+    //    - Pre-allocated order arrays with free lists
     // ============================================================
 
-    static constexpr int64_t MAX_TICK  = 50200;
-    static constexpr int     N_SYMBOLS = 5;
+    Listener* listener_;
+    uint64_t  next_order_id_ = 1;
 
-    // 16-byte Order: 4 fit per 64-byte cache line.
-    struct Order {
-        uint32_t id;
-        uint32_t next;
-        uint32_t prev;
-        uint16_t price;
-        uint8_t  qty;
-        uint8_t  symSide;       // bit 0 = side, bits 1..3 = symIdx
-    };
-
-    struct PriceBucket {
-        uint32_t head     = 0;
-        uint32_t tail     = 0;
-        uint32_t count    = 0;
-        uint32_t totalQty = 0;
-    };
-
-    struct Book {
-        PriceBucket bids[MAX_TICK + 1];
-        PriceBucket asks[MAX_TICK + 1];
-        int64_t  bestBid = 0;
-        int64_t  bestAsk = 0;
-        uint32_t liveBidLevels = 0;
-        uint32_t liveAskLevels = 0;
-        Trade    tradeBuf;      // symbol prefilled per book
-    };
-
-    struct EngineState {
-        Book books[N_SYMBOLS];
-        std::vector<Order>    orderPool;
-        std::vector<uint32_t> idToSlot;
-        uint32_t              freeHead = 0;
-        uint64_t              liveCount = 0;
-    };
-
-    static const char* const SYMBOL_NAMES[N_SYMBOLS];
-
-    // ---- helper methods (implemented in .cpp) ------------------
-    static int symbolToIndex(const std::string& s) noexcept;
-    static uint8_t packSymSide(uint8_t sym, uint8_t side) noexcept;
-    static uint8_t unpackSym(uint8_t ss) noexcept;
-    static uint8_t unpackSide(uint8_t ss) noexcept;
-
-    static uint32_t poolAcquire(EngineState& s) noexcept;
-    static void     poolRelease(EngineState& s, uint32_t slot) noexcept;
-
-    static void bucketPushBack(PriceBucket& b, EngineState& s, uint32_t slot) noexcept;
-    static void bucketUnlink  (PriceBucket& b, EngineState& s, uint32_t slot) noexcept;
-
-    static void restOrder(uint64_t oid, uint8_t symIdx, Side side,
-                          int64_t price, uint32_t qty,
-                          Book& book, EngineState& s) noexcept;
-    static void unrestOrder(uint32_t slot, Book& book, EngineState& s) noexcept;
-
-    template <Side SIDE>
-    static uint32_t doMatch(uint64_t aggId, uint8_t symIdx, int64_t limit, uint32_t qty,
-                            Book& book, EngineState& s, Listener* listener) noexcept;
-
-    // ---- per-instance state ------------------------------------
-    Listener*   listener_;
-    uint64_t    next_order_id_ = 1;
-    EngineState state_;             // direct embed, no pointer indirection
+    // typed pointer to per-instance state; defined in the .cpp
+    EngineState* state_ = nullptr;
 };
 
 }  // namespace exchange
