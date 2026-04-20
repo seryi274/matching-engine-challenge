@@ -40,6 +40,17 @@ public:
     // --------------------------------------------------------
 
     /// Submit a new limit order.
+    ///
+    /// The engine:
+    ///   1. Assigns a unique order_id (monotonically increasing, starting at 1)
+    ///   2. Attempts to match against resting orders on the opposite side
+    ///   3. Calls listener->onTrade() for each execution
+    ///   4. Calls listener->onOrderUpdate() for each affected resting order
+    ///   5. Calls listener->onOrderUpdate() for the incoming order
+    ///   6. If any quantity remains, rests the order on the book
+    ///   7. Returns an OrderAck with the assigned order_id and status
+    ///
+    /// Reject if: price <= 0, quantity == 0, or symbol is empty.
     OrderAck addOrder(const OrderRequest& request);
 
     // --------------------------------------------------------
@@ -47,6 +58,11 @@ public:
     // --------------------------------------------------------
 
     /// Cancel a resting order by its order_id.
+    ///
+    /// If found and still resting, remove from book and call
+    /// listener->onOrderUpdate() with status = Cancelled.
+    ///
+    /// Returns true if cancelled, false if order not found or already filled.
     bool cancelOrder(uint64_t order_id);
 
     // --------------------------------------------------------
@@ -54,6 +70,17 @@ public:
     // --------------------------------------------------------
 
     /// Modify a resting order's price and/or quantity.
+    ///
+    /// Rules:
+    ///   - Order must exist and be resting on the book
+    ///   - Side and symbol cannot change
+    ///   - If price changes: order LOSES time priority
+    ///   - If only quantity decreases (price unchanged): KEEPS time priority
+    ///   - If quantity increases (even if price unchanged): LOSES time priority
+    ///   - new_quantity must be > 0, new_price must be > 0
+    ///   - After amendment, the order MAY match against the opposite side
+    ///
+    /// Returns true if amended, false if order not found or invalid parameters.
     bool amendOrder(uint64_t order_id, int64_t new_price, uint32_t new_quantity);
 
     // --------------------------------------------------------
@@ -61,14 +88,36 @@ public:
     // --------------------------------------------------------
 
     /// Get a snapshot of one side of the book for a given symbol.
+    /// Buy side:  highest price first (best bid at front)
+    /// Sell side: lowest price first  (best ask at front)
     std::vector<PriceLevel> getBookSnapshot(const std::string& symbol, Side side) const;
 
     /// Get total number of live (resting) orders across all symbols.
     uint64_t getOrderCount() const;
 
 private:
+    // ============================================================
+    //  STUDENT: Add your data structures here.
+    //
+    //  Suggested starting point (naive but correct):
+    //    - std::unordered_map<std::string, OrderBook> books_
+    //      where OrderBook contains two std::map<int64_t, std::list<Order>>
+    //      (one for bids sorted descending, one for asks sorted ascending)
+    //    - std::unordered_map<uint64_t, pointer/iterator> order_lookup_
+    //      for O(1) cancel/amend by order_id
+    //
+    //  Better approaches to explore:
+    //    - Flat sorted arrays with binary search
+    //    - Custom memory pools / arena allocators
+    //    - Cache-aligned price level nodes
+    //    - Intrusive linked lists
+    //    - Pre-allocated order arrays with free lists
+    // ============================================================
+
     Listener* listener_;
     uint64_t  next_order_id_ = 1;
+
+    // TODO: Add your internal data structures here.
 
     static constexpr int64_t MINPRICE = 1;
     static constexpr int64_t MAXPRICE = 52000;
@@ -76,29 +125,22 @@ private:
     static constexpr int64_t NOBID = 0;
     static constexpr int64_t NOASK = MAXPRICE + 1;
 
-    struct PriceLevelNode { 
+    struct alignas(16) PriceLevelNode { //16 bytes
         uint32_t head = 0;
         uint32_t tail = 0;
         uint32_t count = 0;
+        uint32_t filler = 0;
     };
 
-    // Exactly 20 Bytes: 3 nodes fit perfectly inside a 64-byte L1 Cache Line
-    struct OrderNode { 
-        uint32_t id;       // Order IDs fit inside 32-bits for the benchmark
-        uint32_t quantity; // Hot path fields placed first
+    struct alignas(32) OrderNode { //32 bytes
+        uint64_t id;
+        int64_t price;
+        uint32_t quantity;
         uint32_t next;
         uint32_t prev;
-        uint32_t pss;      // Packed: price (16-bit), bookidx (8-bit), side (1-bit)
-
-        inline int64_t price() const noexcept   { return static_cast<int64_t>(pss & 0xFFFF); }
-        inline uint8_t bookidx() const noexcept { return static_cast<uint8_t>((pss >> 16) & 0xFF); }
-        inline Side side() const noexcept       { return ((pss >> 24) & 1) ? Side::Sell : Side::Buy; }
-        
-        inline void pack(int64_t p_price, uint8_t p_bookidx, Side p_side) noexcept {
-            pss = static_cast<uint32_t>(p_price) | 
-                  (static_cast<uint32_t>(p_bookidx) << 16) | 
-                  ((p_side == Side::Sell ? 1u : 0u) << 24);
-        }
+        uint16_t bookidx;
+        Side    side;
+        uint8_t filler;
     };
 
     struct OrderBook {
@@ -119,23 +161,24 @@ private:
 
     std::vector<uint32_t> order_lookup_;
     std::vector<OrderNode> order_pool_;
-    uint32_t free_head_ = 0;
+    uint32_t    free_head_ = 0;
 
-    //  O(1) benchmark-specific router
+    // O(1) benchmark-specific router
     inline uint16_t getBookIndex(const std::string& symbol) const noexcept;
 
-    inline uint32_t allocateNode() noexcept;
-    inline void     freeNode(uint32_t) noexcept;
+    uint32_t allocateNode();
+    void     freeNode(uint32_t);
 
-    inline void unlink_node   (PriceLevelNode &level, uint32_t curr) noexcept;
-    inline void push_back_node(PriceLevelNode &level, uint32_t curr) noexcept;
+    void unlink_node   (PriceLevelNode &level, uint32_t curr);
+    void push_back_node(PriceLevelNode &level, uint32_t curr);
 
-    inline void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
-    inline void restSell (OrderBook&, uint32_t pool_idx, int64_t price) noexcept;
-    inline void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side side) noexcept;
+    void restBuy  (OrderBook&, uint32_t pool_idx, int64_t price);
+    void restSell (OrderBook&, uint32_t pool_idx, int64_t price);
+    void removeOrder(OrderBook&, uint32_t pool_idx, int64_t price, Side);
 
-    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
-    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining) noexcept;
+    void matchBuy (OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
+    void matchSell(OrderBook&, uint64_t incoming_id, int64_t limit, uint32_t &remaining);
+
 };
 
 }  // namespace exchange
